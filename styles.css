@@ -291,6 +291,7 @@ body {
   font-family: var(--sans);
   font-size: 15px;
 }
+.pp-code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; line-height: 1.5; resize: vertical; }
 .pp-textarea { min-height: 180px; font-family: var(--serif); font-size: 16px; line-height: 1.6; resize: vertical; }
 .pp-input:focus, .pp-textarea:focus { outline: none; border-color: var(--cob-soft); box-shadow: var(--ring); }
 select.pp-input {

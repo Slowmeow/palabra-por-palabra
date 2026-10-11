@@ -13,8 +13,7 @@ import { schedule, ivlLabel } from "./srs.js";
 
 const CFG = window.PPP_CONFIG || {};
 const LS = {
-  url: "ppp_supabase_url",
-  key: "ppp_supabase_key",
+  firebase: "ppp_firebase_config",
   api: "ppp_anthropic_key",
   theme: "ppp_theme",
   ui: "ppp_ui_lang",
@@ -187,9 +186,8 @@ export async function boot() {
   applyUiLang(localStorage.getItem(LS.ui) || DEFAULTS.uiLang);
   applyTheme(localStorage.getItem(LS.theme) || "light");
   bindOnce();
-  const url = (CFG.SUPABASE_URL || localStorage.getItem(LS.url) || "").trim();
-  const key = (CFG.SUPABASE_PUBLISHABLE_KEY || localStorage.getItem(LS.key) || "").trim();
-  if (!url || !key) return renderSetup();
+  const config = firebaseConfig();
+  if (!config) return renderSetup();
   if (!S.db) {
     let makeDb;
     try {
@@ -198,7 +196,7 @@ export async function boot() {
       return renderMessage(t("boot.libFailed"), t("boot.libFailedText"));
     }
     try {
-      S.db = makeDb(url, key);
+      S.db = makeDb(config);
     } catch (e) {
       return renderSetup(t("setup.connectFailed", { msg: e.message }));
     }
@@ -227,33 +225,60 @@ function renderMessage(title, text) {
   $("#app").innerHTML = authShell(`<h1 class="pp-auth-h">${esc(title)}</h1><p class="pp-lead">${esc(text)}</p>`);
 }
 
+const FIREBASE_REQUIRED = ["apiKey", "authDomain", "projectId", "appId"];
+
+// Accepts the snippet from the Firebase console (a JavaScript object) or plain JSON.
+function parseFirebaseConfig(text) {
+  const out = {};
+  for (const m of String(text).matchAll(/["']?(\w+)["']?\s*:\s*["'`]([^"'`]+)["'`]/g)) out[m[1]] = m[2].trim();
+  return out;
+}
+
+function firebaseConfig() {
+  if (FIREBASE_REQUIRED.every((f) => CFG.FIREBASE?.[f])) return CFG.FIREBASE;
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS.firebase) || "null");
+    return saved && FIREBASE_REQUIRED.every((f) => saved[f]) ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
 function renderSetup(err = "") {
   $("#app").innerHTML = authShell(`
     <h1 class="pp-auth-h">${esc(t("setup.title"))}</h1>
     <p class="pp-lead">${esc(t("setup.lead"))}</p>
     ${err ? `<p class="pp-error-line">${esc(err)}</p>` : ""}
     <form id="setup-form" class="pp-form-plain">
-      <label class="pp-label" for="su-url">Project URL</label>
-      <input class="pp-input" id="su-url" required placeholder="https://xxxx.supabase.co" autocomplete="off" spellcheck="false">
-      <label class="pp-label" for="su-key">Publishable key</label>
-      <input class="pp-input" id="su-key" required placeholder="sb_publishable_…" autocomplete="off" spellcheck="false">
+      <label class="pp-label" for="su-config">${esc(t("setup.configLabel"))}</label>
+      <textarea class="pp-input pp-code" id="su-config" rows="8" required autocomplete="off" spellcheck="false" placeholder="const firebaseConfig = {&#10;  apiKey: &quot;AIza…&quot;,&#10;  authDomain: &quot;…firebaseapp.com&quot;,&#10;  projectId: &quot;…&quot;,&#10;  appId: &quot;1:…&quot;&#10;};"></textarea>
       <button class="pp-primary" type="submit">${esc(t("setup.connect"))}</button>
     </form>`);
   $("#setup-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const url = $("#su-url").value.trim().replace(/\/+$/, "");
-    const key = $("#su-key").value.trim();
-    if (/^sb_secret_/.test(key)) return renderSetup(t("setup.secretKey"));
-    if (/^sk-ant-/.test(key)) return renderSetup(t("setup.anthropicKey"));
-    if (!/^https:\/\/.+/.test(url)) return renderSetup(t("setup.badUrl"));
-    localStorage.setItem(LS.url, url);
-    localStorage.setItem(LS.key, key);
+    const text = $("#su-config").value;
+    if (/private_key|service_account/.test(text)) return renderSetup(t("setup.serviceAccount"));
+    if (/sk-ant-/.test(text)) return renderSetup(t("setup.anthropicKey"));
+    const config = parseFirebaseConfig(text);
+    if (!FIREBASE_REQUIRED.every((f) => config[f])) return renderSetup(t("setup.badConfig"));
+    localStorage.setItem(LS.firebase, JSON.stringify(config));
     boot();
   });
 }
 
+function loginError(er) {
+  const code = String(er?.code || "");
+  const m = String(er?.message || er);
+  if (/invalid login/i.test(m)) return t("login.invalid");
+  if (code.includes("operation-not-allowed")) return t("login.notEnabled");
+  if (code.includes("api-key") || code.includes("invalid-api-key")) return t("login.badConfig");
+  if (code.includes("too-many-requests")) return t("login.tooMany");
+  if (code.includes("network-request-failed")) return t("login.network");
+  return t("login.failed", { msg: m });
+}
+
 function renderLogin(err = "") {
-  const fromConfig = !!(CFG.SUPABASE_URL && CFG.SUPABASE_PUBLISHABLE_KEY);
+  const fromConfig = FIREBASE_REQUIRED.every((f) => CFG.FIREBASE?.[f]);
   $("#app").innerHTML = authShell(`
     <h1 class="pp-auth-h">${esc(t("login.title"))}</h1>
     <p class="pp-lead">${esc(t("login.lead"))}</p>
@@ -275,8 +300,7 @@ function renderLogin(err = "") {
       await S.db.signIn($("#li-email").value.trim(), $("#li-pass").value);
       await startApp();
     } catch (er) {
-      const m = String(er?.message || er);
-      renderLogin(/invalid login/i.test(m) ? t("login.invalid") : t("login.failed", { msg: m }));
+      renderLogin(loginError(er));
     }
   });
 }
@@ -368,12 +392,20 @@ async function startApp() {
     if (target) await openChapter(target.id);
     else renderEmpty();
   } catch (e) {
-    const outdated = /\b(lang|srs)\b/.test(e.message) && /column|schema cache|does not exist/i.test(e.message);
+    // Firebase setup mistakes get their own explanation.
+    const code = String(e.code || "");
+    const kind = code.includes("permission-denied")
+      ? "rules"
+      : code.includes("not-found") || /database .* does not exist/i.test(e.message)
+        ? "noDb"
+        : code.includes("unavailable")
+          ? "offline"
+          : "load";
     setMain(`<div class="pp-empty"><div class="pp-empty-in">
-      <h1 class="pp-hero">${esc(t(outdated ? "err.dbOutdatedTitle" : "err.loadTitle"))}</h1>
-      <p class="pp-lead">${esc(e.message)}</p>
-      <p class="pp-lead">${esc(t(outdated ? "err.dbOutdated" : "err.loadAsleep"))}</p>
-      <button class="pp-primary" data-act="reload">${esc(t("err.reload"))}</button>
+      <h1 class="pp-hero">${esc(t(`err.${kind}Title`))}</h1>
+      <p class="pp-lead">${esc(t(`err.${kind}`))}</p>
+      <p class="pp-note">${esc(e.message)}</p>
+      <div class="pp-row"><button class="pp-primary" data-act="reload">${esc(t("err.reload"))}</button><button class="pp-soft-btn" data-act="logout">${esc(t("account.logout"))}</button></div>
     </div></div>`);
   }
 }
@@ -408,8 +440,7 @@ function bindOnce() {
 const ACTIONS = {
   reload: () => location.reload(),
   "reset-conn": () => {
-    localStorage.removeItem(LS.url);
-    localStorage.removeItem(LS.key);
+    localStorage.removeItem(LS.firebase);
     location.reload();
   },
   "ui-lang": (a) => {

@@ -1,8 +1,8 @@
 # Palabra por palabra
 
-A personal reader for learning languages word by word. Paste a chapter in Spanish, French, Japanese, German or any other language: every word becomes clickable and gets its own knowledge level from 5 (don't know) to 1 (know). Claude writes the translation, pronunciation, origin, history, a fact and an explanation of why the word is used in that exact place. Words you are learning go into spaced-repetition review. Everything is stored in your own database.
+A personal reader for learning languages word by word. Paste a chapter in Spanish, French, Japanese, German or any other language: every word becomes clickable and gets its own knowledge level from 5 (don't know) to 1 (know). Claude writes the translation, pronunciation, origin, history, a fact and an explanation of why the word is used in that exact place. Words you are learning go into spaced-repetition review. Everything is stored in your own Firebase project.
 
-The site is plain files with no build step. Hosting: GitHub Pages. Database and sign-in: Supabase. Both are free. Claude requests are paid separately through the API.
+The site is plain files with no build step. Hosting: GitHub Pages. Database and sign-in: Firebase (free Spark plan). Claude requests are paid separately through the API.
 
 Live site: **https://slowmeow.github.io/palabra-por-palabra/**
 
@@ -12,7 +12,7 @@ If you fork it, your copy will be at `https://<your-github-username>.github.io/p
 
 ## Features
 
-- **Any language.** Words are found with the browser's built-in segmenter, so Japanese, Chinese and Thai work without spaces, and French or Italian elisions are split (`l'homme` → `l'` + `homme`). Spanish, French, German, Japanese and some others get extra tuning: transcription standard, kana readings for Japanese, articles and plurals for German nouns, language-specific dictionaries (RAE, CNRTL, DWDS, Jisho…). Any other language can be added by its code.
+- **Any language.** Words are found with the browser's built-in segmenter, so Japanese, Chinese and Thai work without spaces, French or Italian elisions are split (`l'homme` → `l'` + `homme`), and Japanese verb endings stay with their verb (`食べました`). Spanish, French, German, Japanese and some others get extra tuning: transcription standard, kana readings for Japanese, articles and plurals for German nouns, language-specific dictionaries (RAE, CNRTL, DWDS, Jisho…). Any other language can be added by its code.
 - **Interface in English or Russian**, switchable in Settings and on the sign-in screen.
 - **Explanation language.** Translations and analyses are written in English by default; pick any other language in Settings.
 - **Levels 1–5** with highlighting in the text, keyboard shortcuts and a quick dictionary for the whole chapter.
@@ -24,60 +24,49 @@ If you fork it, your copy will be at `https://<your-github-username>.github.io/p
 
 ## Quick start
 
-1. **Create the database** in Supabase and run `supabase/schema.sql` (steps 1–4 below).
-2. **Publish the site** with GitHub Desktop and turn on Pages (step 5).
-3. **Open the site**, enter the database address and publishable key on the first screen, sign in and paste your Anthropic key in Settings.
+1. **Create a Firebase project** with sign-in and a Firestore database (steps 1–4 below, about 10 minutes).
+2. **Open the site**, paste the project's `firebaseConfig` on the first screen and sign in.
+3. **Paste your Anthropic key** in Settings.
 
-You don't have to edit any files: `config.js` can stay empty, the site asks for the values itself and remembers them in the browser. If you don't want to be asked on a new device, put them into `config.js` later.
+You don't have to edit any files: the site asks for the Firebase config itself and remembers it in the browser. If you don't want to paste it on every new device, put it into `config.js` later.
 
 ---
 
 ## One-time setup
 
-The order is: database (Supabase) first, then the site (GitHub), then the Claude key.
+### 1. Create a Firebase project
 
-### 1. Create a Supabase project
+1. Go to https://console.firebase.google.com and sign in with a Google account.
+2. **Create a project**. Any name, for example `palabra`. Google Analytics isn't needed, you can turn it off.
+3. You stay on the free **Spark** plan; no card is required.
 
-1. Go to supabase.com, create an account and a new project (pick the region closest to you).
-2. Choose and save a database password. You'll need it if something goes wrong.
-3. Wait until the project starts (a couple of minutes).
+### 2. Turn on sign-in and add yourself
 
-### 2. Create the tables
+1. **Build** → **Authentication** → **Get started**.
+2. **Sign-in method** → **Email/Password** → enable the first switch → **Save**.
+3. **Users** → **Add user**: your email and a password. This is the account you'll sign in with.
+4. Recommended: **Settings** → **User actions** → untick **Enable create (sign-up)**, so nobody else can register in your project. Even without this, other people could only ever see their own empty data.
 
-1. In the project open **SQL Editor** → **New query**.
-2. Copy the whole `supabase/schema.sql` file and paste it into the editor.
-3. Press **Run**. You should see "Success".
+### 3. Create the database and its rules
 
-### 3. Create your account and close sign-ups
+1. **Build** → **Firestore Database** → **Create database**.
+2. Choose a location close to you (for example `eur3` for Europe) and **Start in production mode**.
+3. Open the **Rules** tab, replace everything with the contents of [`firestore.rules`](firestore.rules) and press **Publish**.
 
-1. **Authentication** → **Users** → **Add user** → **Create new user**.
-2. Enter your email and a password, turn on "Auto Confirm User", create the user.
-3. **Authentication** → **Sign In / Providers** (or Settings) → turn off **Allow new users to sign up** and save.
+The rules let each signed-in user read and write only their own folder `users/{uid}`. Without them the site shows "Firestore refused access".
 
-Now nobody else can register on your site. Only this account can sign in.
+### 4. Get the config for the site
 
-### 4. Get the two values for config.js
+1. Press the gear next to **Project Overview** → **Project settings** → **General**.
+2. Under **Your apps** press the **Web** button (`</>`), give the app any name, leave Firebase Hosting off, **Register app**.
+3. Copy the whole `firebaseConfig = { … }` snippet.
+4. Open the site and paste it on the first screen, then sign in with the email and password from step 2.
 
-1. In the project press **Connect** (or **Project Settings** → **API Keys**).
-2. Copy the **Project URL** (`https://…supabase.co`) and the **publishable key** (starts with `sb_publishable_`).
-3. Enter them on the site's first screen, or put them into `config.js`.
+These values are safe in a public repository and on the site: they only identify the project. Your data is protected by your password and the rules. To skip the first screen on every device, put `apiKey`, `authDomain`, `projectId` and `appId` into `config.js`.
 
-Both values are safe in a public repository: without an email and password they open nothing, because access to rows is protected by the policies in `schema.sql`.
+**Never paste a service account key (JSON with `private_key`) or your Anthropic key (`sk-ant-…`) into the site or `config.js`.**
 
-**Never put your Anthropic key (`sk-ant-…`) into `config.js`.** It is entered in the site's Settings and stays in your browser.
-
-### 5. Publish the site on GitHub Pages
-
-With GitHub Desktop:
-
-1. Open the repository in GitHub Desktop and press **Publish repository**.
-2. Name it `palabra-por-palabra`, untick **Keep this code private** (free GitHub Pages needs a public repository) and publish.
-3. On github.com open the repository → **Settings** → **Pages** → Source: **GitHub Actions**.
-4. Publishing runs on every push through `.github/workflows/deploy.yml`. A minute later the site opens at `https://<your-github-username>.github.io/palabra-por-palabra/`.
-
-The repository can stay public: there are no secrets in the files, and the data is protected by your password and the database policies.
-
-### 6. Get a Claude API key
+### 5. Get a Claude API key
 
 1. Go to console.anthropic.com and add credit to your balance.
 2. **API Keys** → **Create Key**, copy the whole key.
@@ -85,19 +74,21 @@ The repository can stay public: there are no secrets in the files, and the data 
 
 API billing is separate from a claude.ai subscription: you pay per token.
 
-### 7. Keep the database awake
+### Publishing your own copy on GitHub Pages
 
-A free Supabase project pauses after a week without requests. If you read regularly, this won't happen.
-
-To be safe, turn on the automatic ping: in the repository **Settings** → **Secrets and variables** → **Actions** → **New repository secret**, create `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` with the same values you entered on the site. GitHub will wake the database every three days.
-
-GitHub switches off scheduled workflows after 60 days without commits. The ping workflow re-enables itself through the GitHub API on every run to prevent that. If you ever see it disabled in the **Actions** tab, press **Enable workflow**.
+The live site above is already published. For your own fork: **Settings** → **Pages** → Source: **GitHub Actions**. Every push to `main` publishes the site through `.github/workflows/deploy.yml`.
 
 ---
 
-## Updating from an earlier version
+## Free plan limits
 
-This version stores a language for every chapter and word and keeps review data. After updating the files, **run `supabase/schema.sql` once more** in the SQL Editor. It adds the new columns and keeps all your data; existing chapters and words are marked as Spanish. Until you do this, the site shows a message asking for the update.
+Firebase's free Spark plan allows 1 GiB of data, 50,000 document reads and 20,000 writes a day, and it never pauses. The site is built to stay far below that: words are packed into 32 documents per language, so opening the site costs a few dozen reads even with thousands of words, and a new chapter costs a few dozen writes. A detailed card is read only when you open its word.
+
+---
+
+## Moving from the earlier Supabase version
+
+Download a backup in the old version (Settings → "Download backup"), then in this version press "Restore backup" and choose the file. Chapters and words from old backups become Spanish, as they were.
 
 On first start the settings move to the new models (Opus 5.5 for analysis, Haiku 5.5 for the dictionary), and translations and explanations switch to English. Quick translations made earlier in Russian are redone automatically when you open a chapter (with Haiku 5.5 this costs fractions of a cent). Detailed cards keep their text and get a "Rewrite in English" button. To keep everything in Russian, choose Russian as the explanation language in Settings.
 
@@ -132,28 +123,28 @@ Thinking depth goes from low to maximum. Maximum gives a more careful analysis b
 
 ## Backups
 
-Supabase makes no backups on the free plan. Every couple of weeks open Settings and press "Download backup": you get one JSON file with all chapters, words, levels, cards and review data. "Restore backup" loads it back. Backups from the earlier version can be restored too.
+Every couple of weeks open Settings and press "Download backup": you get one JSON file with all chapters, words, levels, cards and review data. "Restore backup" loads it back. Backups from the earlier Supabase version can be restored too.
 
 ## Security
 
-- Data is protected by email-and-password sign-in and by database policies: each user sees only their own rows.
+- Data is protected by email-and-password sign-in and by the Firestore rules: each user sees only their own folder.
 - The Anthropic key lives in your browser's `localStorage` and goes straight to Anthropic. That's fine for a personal site, but don't open the site on someone else's computer and don't paste the key where you can't remove it. If the key leaks, revoke it in the Anthropic Console with one click.
-- Never publish `sb_secret_…`: the Supabase secret key bypasses all policies. The site doesn't need it.
+- The Firebase web config is public by design. Never publish a service account key: it bypasses all rules.
 
 ## Files
 
 ```
 index.html             the page
 styles.css             styles
-config.js              Supabase address and key (you fill them in)
+config.js              Firebase web config (optional, you fill it in)
+firestore.rules        database access rules to paste into Firebase
 js/app.js              logic: reading, levels, word panel, review, settings
 js/claude.js           Claude API requests, models, prompts
-js/db.js               database access
+js/db.js               Firebase sign-in and Firestore storage
 js/text.js             splitting text into sentences and words for any language
 js/langs.js            language profiles and external dictionaries
 js/i18n.js             interface strings (English, Russian)
 js/srs.js              spaced-repetition schedule
 js/icons.js            icons
-supabase/schema.sql    tables, upgrades and access rules
-.github/workflows/     publishing to Pages and the database keep-alive ping
+.github/workflows/     publishing to GitHub Pages
 ```

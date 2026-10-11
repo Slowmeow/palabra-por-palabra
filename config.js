@@ -1,11 +1,16 @@
-// Connection to your Supabase database.
-// Both values are safe to publish: without an email and password they give no access to data.
-// Where to find them: Supabase → your project → Connect button (or Project Settings → API Keys).
+// Connection to your Firebase project.
+// Where to find it: Firebase console → Project settings → General → Your apps → the web app → firebaseConfig.
+// These values are safe to publish: they only identify the project. Your data is protected by
+// your email and password and by the rules in firestore.rules.
+// You can also leave this empty: the site asks for the config on the first screen and remembers it.
 //
-// WARNING: never put your Anthropic API key (sk-ant-...) here.
-// It is entered in the site's own Settings and stays in your browser.
+// WARNING: never put your Anthropic API key (sk-ant-...) or a service account key here.
 
 window.PPP_CONFIG = {
-  SUPABASE_URL: "",               // for example: "https://abcdefghijkl.supabase.co"
-  SUPABASE_PUBLISHABLE_KEY: "",   // for example: "sb_publishable_..."
+  FIREBASE: {
+    apiKey: "",
+    authDomain: "",
+    projectId: "",
+    appId: "",
+  },
 };

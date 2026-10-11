@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// Paste this into Firebase console → Firestore Database → Rules and press Publish.
+// Every signed-in user can read and write only their own folder, users/{their uid}.
+// Nobody else, signed in or not, can see anything.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}
