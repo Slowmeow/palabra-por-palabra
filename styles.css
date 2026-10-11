@@ -567,6 +567,7 @@ select.pp-input {
   color: var(--ink);
   font-size: 15px;
 }
+.pp-search input { font-family: var(--sans); }
 .pp-search input:focus { outline: none; border-color: var(--cob-soft); box-shadow: var(--ring); }
 
 .pp-filter { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
@@ -703,6 +704,87 @@ select.pp-input {
 .pp-reader.is-cjk .pp-wd { margin: 0 1px; padding: 0; }
 .pp-reader.is-cjk .pp-p { text-align: left; }
 [dir="rtl"].pp-reader .pp-p { text-align: right; }
+
+/* ---------- Library home ---------- */
+
+a.pp-brand { color: inherit; text-decoration: none; border-radius: 10px; }
+a.pp-brand:hover .pp-brand-t { color: var(--cob); }
+a.pp-primary { text-decoration: none; }
+.pp-privacy { margin-top: 14px; font-size: 12.5px; }
+
+.pp-home { max-width: 1080px; margin: 0 auto; padding: 28px 20px 90px; display: grid; gap: 22px; }
+.pp-home-head { display: grid; gap: 14px; }
+.pp-home-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.pp-stat {
+  display: grid; gap: 2px; justify-items: start;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  text-align: left;
+}
+.pp-stat:hover { border-color: var(--cob-soft); }
+.pp-stat b { font-family: var(--serif); font-size: 28px; font-weight: 500; line-height: 1.1; }
+.pp-stat span { color: var(--ink3); font-size: 13px; }
+
+.pp-continue {
+  display: grid; gap: 6px;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--cob) 10%, var(--card)), var(--card));
+  border: 1px solid color-mix(in srgb, var(--cob) 30%, var(--line));
+  color: var(--ink);
+  text-decoration: none;
+  box-shadow: var(--shadow);
+}
+.pp-continue:hover { border-color: var(--cob-soft); }
+.pp-continue-k { font-size: 12px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--cob); }
+.pp-continue-t { font-family: var(--serif); font-size: 26px; font-weight: 500; line-height: 1.2; }
+.pp-continue .pp-levelbar { max-width: 420px; margin-top: 4px; }
+.pp-continue-go { display: inline-flex; align-items: center; gap: 4px; justify-self: start; margin-top: 4px; color: var(--cob); font-weight: 600; }
+
+.pp-home-lib { display: grid; gap: 12px; }
+.pp-home-tools { display: flex; gap: 10px; align-items: center; }
+.pp-home-search { flex: 1; }
+.pp-home-tools .pp-primary { flex: none; }
+.pp-home-lib .pp-filter { margin: 0; }
+
+.pp-home-lang { margin-top: 12px; }
+.pp-home-lang-h { display: flex; align-items: center; gap: 8px; font-family: var(--serif); font-size: 22px; font-weight: 500; }
+.pp-book { margin-top: 14px; }
+.pp-book-h { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.pp-book-h h3 { font-family: var(--serif); font-size: 17px; font-weight: 700; color: var(--ink2); }
+
+.pp-ch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
+.pp-ch-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  transition: border-color .15s, box-shadow .15s;
+}
+.pp-ch-card:hover { border-color: var(--cob-soft); box-shadow: 0 6px 18px -12px rgba(0, 0, 0, .35); }
+.pp-ch-card.is-last { border-color: color-mix(in srgb, var(--cob) 45%, var(--line)); }
+.pp-ch-open { flex: 1; display: grid; gap: 6px; align-content: start; padding: 14px 14px 10px; color: var(--ink); text-decoration: none; }
+.pp-ch-title { font-family: var(--serif); font-size: 18px; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
+.pp-ch-open .pp-levelbar { margin-top: 2px; }
+.pp-ch-foot { display: flex; justify-content: space-between; gap: 8px; color: var(--ink3); font-size: 12.5px; min-height: 1.2em; }
+.pp-ch-tools { display: flex; justify-content: flex-end; gap: 2px; padding: 0 8px 8px; }
+
+.pp-end { flex-wrap: wrap; }
+
+@container shell (max-width: 600px) {
+  .pp-home { padding: 18px 16px 80px; gap: 16px; }
+  .pp-home-stats { gap: 8px; }
+  .pp-stat { padding: 10px; }
+  .pp-stat b { font-size: 22px; }
+  .pp-stat span { font-size: 12px; }
+  .pp-continue-t { font-size: 22px; }
+  .pp-home-tools .pp-primary span { display: none; }
+  .pp-ch-grid { grid-template-columns: 1fr; }
+}
 
 /* ---------- Shared library ---------- */
 

@@ -15,6 +15,7 @@ The rest of this file is for whoever runs the site (the admin) or a fork of it.
 - **Any language.** Words are found with the browser's built-in segmenter, so Japanese, Chinese and Thai work without spaces, French or Italian elisions are split (`l'homme` → `l'` + `homme`), and Japanese verb endings stay with their verb (`食べました`). Spanish, French, German, Japanese and some others get extra tuning: transcription standard, kana readings for Japanese, articles and plurals for German nouns, language-specific dictionaries (RAE, CNRTL, DWDS, Jisho…). Any other language can be added by its code.
 - **Interface in English or Russian**, switchable in Settings and on the sign-in screen.
 - **Explanation language.** Translations and analyses are written in English by default; pick any other language in Settings.
+- **Library home.** All your texts grouped by language and book, with progress bars, search, a language filter and a "Continue reading" card that brings you back to the exact place you stopped. The logo always leads home; the browser's back button works.
 - **Levels 1–5** with highlighting in the text, keyboard shortcuts and a quick dictionary for the whole chapter.
 - **Detailed analysis** by Claude: origin, history, a fact, related words, a mnemonic and why the word stands in this exact sentence. Every field can be edited by hand.
 - **Review mode** with flashcards and spaced repetition, rated with the same 5→1 levels.
@@ -126,7 +127,8 @@ On first start the settings move to the new models (Opus 5.5 for analysis, Haiku
 
 ## How to use it
 
-- **Add a chapter**: the plus in the header. Choose the language of the text and paste it. "Join lines" helps when the text was copied from a PDF and broken into lines. Before saving you see how many words are new to you.
+- **Library**: the logo or "Library" in the chapter list. Texts are grouped by language and book; the folder button on a card moves it into a book. At the end of a chapter, "Next" opens the following chapter of the same book.
+- **Add a chapter**: the plus in the header. Choose the language of the text, optionally a book, and paste it. "Join lines" helps when the text was copied from a PDF and broken into lines. Before saving you see how many words are new to you.
 - **Languages**: the badge next to the chapter list shows the current language. Chapters of different languages are grouped in the list; opening a chapter switches the language for the vocabulary, progress and review.
 - **Levels 1–5.** Every new word starts at 5, "don't know". Tap a word and set the level with a button or keys 1–5. Arrows ← → move to the neighbouring word. Level 1 means learned, and the word stops being highlighted.
 - **Highlight**: the marker button in the header switches between all words, only unlearned ones and no highlight. The lower the level, the paler the word.
@@ -160,6 +162,11 @@ Every couple of weeks open Settings and press "Download backup": you get one JSO
 - Data is protected by Google or email sign-in and by the Firestore rules: each user's chapters, levels, notes and settings are visible only to that user. The shared library is readable by every signed-in user; entries can't be overwritten, and only their author or an admin can delete them.
 - The Anthropic key lives in your browser's `localStorage` and goes straight to Anthropic. That's fine for a personal site, but don't open the site on someone else's computer and don't paste the key where you can't remove it. If the key leaks, revoke it in the Anthropic Console with one click.
 - The Firebase web config is public by design. Never publish a service account key: it bypasses all rules.
+- Only accounts with a verified email (every Google account) can add to the shared library, and an explanation always carries its author's real Google name.
+- A Content Security Policy in `index.html` lets the page run scripts only from this site and Google's Firebase CDN and send data only to Firebase and the Claude API, so even injected text can't steal the Claude key.
+- Everything shown on the page from users or the shared library is escaped. Shared explanations are cleaned to the expected fields before they are shown.
+- The publishing workflow uses actions pinned to exact commits and publishes only the site's files (`index.html`, `config.js`, `styles.css`, `js/`).
+- Recommended in the Firebase and Google Cloud consoles: turn on App Check, restrict the browser API key to your site's address, and disable sign-in providers you don't use.
 
 ## Files
 
@@ -168,7 +175,7 @@ index.html             the page
 styles.css             styles
 config.js              Firebase web config (optional, you fill it in)
 firestore.rules        database access rules to paste into Firebase
-js/app.js              logic: reading, levels, word panel, review, settings
+js/app.js              logic: library home, reading, levels, word panel, review, library, admin, settings
 js/claude.js           Claude API requests, models, prompts
 js/db.js               Firebase sign-in and Firestore storage
 js/text.js             splitting text into sentences and words for any language

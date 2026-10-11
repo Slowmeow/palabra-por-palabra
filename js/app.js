@@ -87,6 +87,9 @@ const S = {
   libMore: new Set(), // shared ids expanded in the list
   sharedCtx: new Map(), // lang|xl|sentence|word -> shared "why here", or null when there is none
   admin: null, // admin panel data
+  view: "home", // "home" (the library) or "read"
+  homeQ: "", // search on the home screen
+  homeLang: "", // language filter on the home screen; "" = all
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -312,6 +315,7 @@ function renderLogin(err = "") {
       <input class="pp-input" id="li-pass" type="password" required autocomplete="current-password">
       <button class="pp-primary" type="submit" id="li-btn">${esc(t("login.submit"))}</button>
     </form>
+    <p class="pp-note pp-privacy">${esc(t("login.privacy"))}</p>
     ${fromConfig ? "" : `<button class="pp-link pp-auth-alt" data-act="reset-conn">${esc(t("login.otherDb"))}</button>`}`);
   $("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -343,7 +347,7 @@ function shellHTML() {
   return `
   <div class="pp-shell" id="shell">
     <header class="pp-top">
-      <div class="pp-brand"><span class="pp-logo" aria-hidden="true">ñ</span><span class="pp-brand-t">Palabra por palabra</span></div>
+      <a class="pp-brand" href="#/" title="${esc(t("home.title"))}"><span class="pp-logo" aria-hidden="true">ñ</span><span class="pp-brand-t">Palabra por palabra</span></a>
       <span class="pp-lang-badge" id="lang-badge"></span>
       <div class="pp-select-wrap" id="chapter-picker" hidden>
         <select class="pp-select" id="chapter-select" aria-label="${esc(t("top.chapter"))}"></select>
@@ -395,6 +399,12 @@ function migrateSettings(saved) {
     if (!saved?.uiLang) s.uiLang = uiLang();
     s.v = SETTINGS_VERSION;
   }
+  s.size = Math.min(30, Math.max(16, Number(s.size) || DEFAULTS.size));
+  if (!HL_ORDER.includes(s.highlight)) s.highlight = DEFAULTS.highlight;
+  if (!["light", "dark"].includes(s.theme)) s.theme = DEFAULTS.theme;
+  if (!REVIEW_NEW_OPTIONS.includes(Number(s.reviewNew))) s.reviewNew = DEFAULTS.reviewNew;
+  s.reviewNew = Number(s.reviewNew);
+  if (!Array.isArray(s.liked)) s.liked = [];
   return s;
 }
 
@@ -424,14 +434,13 @@ async function startApp() {
     $("#admin-btn").hidden = !S.isAdmin;
     // Keeps the admin's list of users current; never blocks the app.
     S.db.saveProfile({ words: words.length, cards: words.filter((r) => r.has_card).length }).catch(() => {});
-    const target = S.chapters.find((c) => c.id === S.settings.lastChapter) || S.chapters.at(-1);
-    S.lang = target?.lang || S.settings.studyLang || "es";
+    const last = S.chapters.find((c) => c.id === S.settings.lastChapter) || S.chapters.at(-1);
+    S.lang = last?.lang || S.settings.studyLang || "es";
     applyReaderSettings();
     updateChapterSelect();
     updateVocabCount();
     updateReviewCount();
-    if (target) await openChapter(target.id);
-    else renderEmpty();
+    route();
   } catch (e) {
     // Firebase setup mistakes get their own explanation.
     const code = String(e.code || "");
@@ -476,6 +485,8 @@ function bindOnce() {
   app.addEventListener("input", onInput);
   document.addEventListener("keydown", onKey);
   setInterval(tick, 1000);
+  window.addEventListener("hashchange", route);
+  window.addEventListener("scroll", savePosSoon, { passive: true });
 }
 
 const ACTIONS = {
@@ -558,6 +569,11 @@ const ACTIONS = {
     renderSettings();
   },
   "rename-chapter": (a) => renameChapter(a.dataset.id),
+  "chapter-book": (a) => moveToBook(a.dataset.id),
+  "home-lang": (a) => {
+    S.homeLang = a.dataset.val;
+    renderHome();
+  },
   "delete-chapter": (a) => deleteChapter(a.dataset.id),
   export: () => exportBackup(),
   import: () => $("#import-file")?.click(),
@@ -638,7 +654,7 @@ function askLangCode() {
 
 function onChange(e) {
   const tg = e.target;
-  if (tg.id === "chapter-select") return void openChapter(tg.value);
+  if (tg.id === "chapter-select") return tg.value ? goChapter(tg.value) : goHome();
   if (tg.id === "add-join") return updateAddPreview();
   if (tg.id === "add-lang") {
     if (tg.value === "__other") {
@@ -692,6 +708,9 @@ function onInput(e) {
   if (tg.dataset.role === "vocab-search") {
     S.vfilter.q = tg.value;
     renderVocabList();
+  } else if (tg.dataset.role === "home-search") {
+    S.homeQ = tg.value;
+    renderHomeList();
   } else if (tg.id === "add-text") {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(updateAddPreview, 150);
@@ -754,13 +773,16 @@ function updateChapterSelect() {
   if (!sel) return;
   $("#chapter-picker").hidden = !S.chapters.length;
   const langs = chapterLangs();
-  const opt = (c) => `<option value="${esc(c.id)}"${S.chapter?.id === c.id ? " selected" : ""}>${esc(c.title)}</option>`;
+  const reading = S.view === "read";
+  const opt = (c) =>
+    `<option value="${esc(c.id)}"${reading && S.chapter?.id === c.id ? " selected" : ""}>${esc(bookOf(c) ? `${bookOf(c)} · ${c.title}` : c.title)}</option>`;
   sel.innerHTML =
-    langs.length > 1
+    `<option value=""${reading ? "" : " selected"}>${esc(t("home.title"))}</option>` +
+    (langs.length > 1
       ? langs
           .map((l) => `<optgroup label="${esc(langName(l))}">${S.chapters.filter((c) => c.lang === l).map(opt).join("")}</optgroup>`)
           .join("")
-      : S.chapters.map(opt).join("");
+      : S.chapters.map(opt).join(""));
   const badge = $("#lang-badge");
   if (badge) {
     badge.textContent = langCode(S.lang);
@@ -796,7 +818,11 @@ function applyReaderSettings() {
 }
 
 async function openChapter(id) {
-  if (S.editing && !confirm(t("confirm.leaveEdit"))) return updateChapterSelect();
+  if (S.editing && !confirm(t("confirm.leaveEdit"))) {
+    history.replaceState(null, "", S.view === "read" && S.chapter ? `#/read/${S.chapter.id}` : "#/");
+    return updateChapterSelect();
+  }
+  S.view = "read";
   stopDictionary(true);
   setMain(loadingHTML("reader.opening"));
   try {
@@ -821,7 +847,7 @@ async function openChapter(id) {
       S.panelLang = null;
       if (S.panel.open) renderPanel();
     }
-    window.scrollTo(0, 0);
+    restorePos(id);
     if (S.settings.autoDict || !apiKey()) prepareDictionary();
   } catch (e) {
     setMain(`<div class="pp-empty"><div class="pp-empty-in"><h1 class="pp-hero">${esc(t("reader.openFailed"))}</h1><p class="pp-lead">${esc(e.message)}</p></div></div>`);
@@ -829,6 +855,7 @@ async function openChapter(id) {
 }
 
 function renderEmpty() {
+  S.view = "home";
   S.chapter = null;
   S.st = null;
   setMain(`<div class="pp-empty"><div class="pp-empty-in">
@@ -863,8 +890,16 @@ function renderChapter() {
       <div class="pp-levelbar" id="chap-levelbar" aria-hidden="true"></div>
     </div>
     <article class="${readerClass()}" id="reader" ${readerLangAttrs(lang)} style="font-size:${Number(S.settings.size)}px">${html}</article>
-    <div class="pp-end"><span>${esc(t("reader.end"))}</span><button class="pp-link" data-act="add-chapter">${esc(t("reader.addNext"))}</button></div>`);
+    <div class="pp-end"><span>${esc(t("reader.end"))}</span>${endLinksHTML()}</div>`);
   updateChapterStats();
+}
+
+function endLinksHTML() {
+  const next = nextChapter(S.chapter);
+  const forward = next
+    ? `<a class="pp-primary" href="#/read/${esc(next.id)}">${esc(t("reader.next", { title: next.title }))} ${I.right}</a>`
+    : `<button class="pp-link" data-act="add-chapter">${esc(t("reader.addNext"))}</button>`;
+  return `${forward}<a class="pp-link" href="#/">${esc(t("reader.toLibrary"))}</a>`;
 }
 
 function levelCounts(words, lang = S.lang) {
@@ -944,6 +979,223 @@ function scrollToToken(sid, ti) {
   if (el) keepVisible(el);
 }
 
+/* ---------------- Navigation and the library home ---------------- */
+
+// Routes: "#/" is the library, "#/read/<chapter id>" is a chapter, so the browser's back button works.
+const READ_ROUTE = /^#\/read\/([A-Za-z0-9_-]{1,80})$/;
+
+function go(hash) {
+  if (location.hash === hash) route();
+  else location.hash = hash;
+}
+const goChapter = (id) => go(`#/read/${id}`);
+const goHome = () => go("#/");
+
+function route() {
+  if (!S.db || !$("#shell")) return;
+  if (!S.chapters.length) return renderEmpty();
+  const id = location.hash.match(READ_ROUTE)?.[1];
+  const ch = id && S.chapters.find((c) => c.id === id);
+  if (ch) {
+    if (S.view !== "read" || S.chapter?.id !== ch.id) openChapter(ch.id);
+    return;
+  }
+  if (location.hash && location.hash !== "#/") history.replaceState(null, "", "#/");
+  renderHome();
+}
+
+// Where you stopped in each chapter, as a share of the page, kept in this browser.
+const posKey = (id) => `ppp_pos_${id}`;
+function readPos(id) {
+  try {
+    return Math.min(1, Math.max(0, Number(localStorage.getItem(posKey(id))) || 0));
+  } catch {
+    return 0;
+  }
+}
+let posTimer;
+function savePosSoon() {
+  if (S.view !== "read" || !S.chapter) return;
+  clearTimeout(posTimer);
+  const id = S.chapter.id;
+  posTimer = setTimeout(() => {
+    const max = document.documentElement.scrollHeight - window.innerHeight;
+    if (max <= 0 || S.view !== "read" || S.chapter?.id !== id) return;
+    try {
+      localStorage.setItem(posKey(id), (window.scrollY / max).toFixed(4));
+    } catch {
+      /* private mode: no reading position, nothing else breaks */
+    }
+  }, 400);
+}
+function restorePos(id) {
+  const r = readPos(id);
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  window.scrollTo(0, r > 0.01 && max > 0 ? Math.round(r * max) : 0);
+}
+
+const bookOf = (c) => String(c?.book || "").trim();
+const chaptersInOrder = (list) =>
+  [...list].sort((a, b) => (a.position || 0) - (b.position || 0) || String(a.created_at).localeCompare(String(b.created_at)));
+
+// The chapter after this one in the same language and book.
+function nextChapter(ch) {
+  const same = chaptersInOrder(S.chapters.filter((c) => c.lang === ch.lang && bookOf(c) === bookOf(ch)));
+  const i = same.findIndex((c) => c.id === ch.id);
+  return i >= 0 ? same[i + 1] || null : null;
+}
+
+function chapterProgress(c) {
+  const set = S.chapterWords.get(c.id);
+  if (!set) return null;
+  const counts = levelCounts(set, c.lang);
+  return { counts, total: set.size, pct: set.size ? Math.round((counts[1] / set.size) * 100) : 0 };
+}
+
+// Word lists of chapters not opened in this session, for their progress bars.
+// The text comes from the local cache when possible, so this is usually free.
+let homeLoading = false;
+async function loadHomeProgress() {
+  if (homeLoading) return;
+  const todo = S.chapters.filter((c) => !S.chapterWords.has(c.id));
+  if (!todo.length) return;
+  homeLoading = true;
+  let n = 0;
+  for (const c of todo) {
+    try {
+      const full = await S.db.getChapter(c.id);
+      S.chapterWords.set(c.id, new Set(buildStructure(full.paragraphs, c.lang).firstOcc.keys()));
+    } catch {
+      S.chapterWords.set(c.id, new Set());
+    }
+    if (++n % 6 === 0 && S.view === "home") renderHomeList();
+  }
+  homeLoading = false;
+  if (S.view === "home") renderHomeList();
+}
+
+function renderHome() {
+  if (!S.chapters.length) return renderEmpty();
+  if (S.editing && !confirm(t("confirm.leaveEdit"))) {
+    history.replaceState(null, "", S.chapter ? `#/read/${S.chapter.id}` : "#/");
+    return;
+  }
+  S.view = "home";
+  S.editing = false;
+  if (S.panel.open && S.panel.mode === "word") closePanel(true);
+  S.sel = null;
+  const last = S.chapters.find((c) => c.id === S.settings.lastChapter);
+  let learned = 0;
+  for (const m of S.vocab.values()) for (const r of m.values()) if (r.level === 1) learned++;
+  const langs = chapterLangs();
+  if (S.homeLang && !langs.includes(S.homeLang)) S.homeLang = "";
+  const chip = ([v, label]) =>
+    `<button class="pp-chip-btn${S.homeLang === v ? " on" : ""}" data-act="home-lang" data-val="${esc(v)}">${esc(label)}</button>`;
+  setMain(`<div class="pp-home">
+    <header class="pp-home-head">
+      <h1 class="pp-hero">${esc(t("home.title"))}</h1>
+      <div class="pp-home-stats">
+        <button class="pp-stat" data-act="review"><b>${fmtInt(dueCount(S.lang))}</b><span>${esc(t("home.due", { lang: langName(S.lang) }))}</span></button>
+        <button class="pp-stat" data-act="panel" data-mode="vocab"><b>${fmtInt(learned)}</b><span>${esc(t("home.learned"))}</span></button>
+        <button class="pp-stat" data-act="panel" data-mode="progress"><b>${fmtInt(S.chapters.length)}</b><span>${esc(t("home.texts", { n: S.chapters.length }))}</span></button>
+      </div>
+    </header>
+    ${last ? continueHTML(last) : ""}
+    <section class="pp-home-lib" aria-label="${esc(t("home.library"))}">
+      <div class="pp-home-tools">
+        <label class="pp-search pp-home-search"><input data-role="home-search" value="${esc(S.homeQ)}" placeholder="${esc(t("home.search"))}" aria-label="${esc(t("home.search"))}"></label>
+        <button class="pp-primary" data-act="add-chapter">${I.plus}<span>${esc(t("home.add"))}</span></button>
+      </div>
+      ${langs.length > 1 ? `<div class="pp-filter" role="group" aria-label="${esc(t("home.langFilter"))}">${[["", t("home.allLangs")], ...langs.map((l) => [l, langName(l)])].map(chip).join("")}</div>` : ""}
+      <div id="home-list"></div>
+    </section>
+  </div>`);
+  renderHomeList();
+  updateChapterSelect();
+  window.scrollTo(0, 0);
+  loadHomeProgress();
+}
+
+function continueHTML(c) {
+  const p = chapterProgress(c);
+  const read = Math.round(readPos(c.id) * 100);
+  const where = [langName(c.lang), bookOf(c), read ? t("home.readPct", { pct: read }) : ""].filter(Boolean).join(" · ");
+  return `<a class="pp-continue" href="#/read/${esc(c.id)}">
+    <span class="pp-continue-k">${esc(t("home.continue"))}</span>
+    <span class="pp-continue-t" ${readerLangAttrs(c.lang)}>${esc(c.title)}</span>
+    <span class="pp-note">${esc(where)}</span>
+    ${p ? `<span class="pp-levelbar" aria-hidden="true">${levelBarHTML(p.counts)}</span>` : ""}
+    <span class="pp-continue-go">${esc(t("home.continueBtn"))} ${I.right}</span>
+  </a>`;
+}
+
+function renderHomeList() {
+  const box = $("#home-list");
+  if (!box) return;
+  const q = searchKey(S.homeQ.trim());
+  const match = (c) => !q || searchKey(c.title).includes(q) || searchKey(bookOf(c)).includes(q);
+  let shown = 0;
+  const html = chapterLangs()
+    .filter((l) => !S.homeLang || l === S.homeLang)
+    .map((l) => {
+      const list = chaptersInOrder(S.chapters.filter((c) => c.lang === l && match(c)));
+      if (!list.length) return "";
+      shown += list.length;
+      // Books alphabetically, loose texts last.
+      const books = [...new Set(list.map(bookOf))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b, uiLang()));
+      return `<section class="pp-home-lang">
+        <h2 class="pp-home-lang-h"><span class="pp-lang-tag">${esc(langCode(l))}</span> ${esc(langName(l))}</h2>
+        ${books.map((b) => bookHTML(b, list.filter((c) => bookOf(c) === b))).join("")}
+      </section>`;
+    })
+    .join("");
+  box.innerHTML = shown ? html : `<p class="pp-note">${esc(t("home.nothing"))}</p>`;
+}
+
+function bookHTML(book, list) {
+  return `<div class="pp-book">
+    <div class="pp-book-h"><h3>${esc(book || t("home.looseTexts"))}</h3><span class="pp-note">${esc(t("home.bookMeta", { n: list.length }))}</span></div>
+    <div class="pp-ch-grid">${list.map(chapterCardHTML).join("")}</div>
+  </div>`;
+}
+
+function chapterCardHTML(c) {
+  const p = chapterProgress(c);
+  const read = Math.round(readPos(c.id) * 100);
+  const words = p ? p.total : c.words;
+  const meta = [words ? t("home.words", { n: words }) : "", fmtDate(c.created_at)].filter(Boolean).join(" · ");
+  return `<article class="pp-ch-card${c.id === S.settings.lastChapter ? " is-last" : ""}">
+    <a class="pp-ch-open" href="#/read/${esc(c.id)}">
+      <span class="pp-ch-title" ${readerLangAttrs(c.lang)}>${esc(c.title)}</span>
+      <span class="pp-note">${esc(meta)}</span>
+      <span class="pp-levelbar" aria-hidden="true">${p ? levelBarHTML(p.counts) : ""}</span>
+      <span class="pp-ch-foot"><span>${p ? esc(t("home.known", { pct: p.pct })) : ""}</span><span>${read ? esc(t("home.readPct", { pct: read })) : ""}</span></span>
+    </a>
+    <div class="pp-ch-tools">
+      <button class="pp-icon-btn sm" data-act="chapter-book" data-id="${esc(c.id)}" title="${esc(t("home.moveBook"))}" aria-label="${esc(t("home.moveBook"))}">${I.folder}</button>
+      <button class="pp-icon-btn sm" data-act="rename-chapter" data-id="${esc(c.id)}" title="${esc(t("chapters.rename"))}" aria-label="${esc(t("chapters.rename"))}">${I.edit}</button>
+      <button class="pp-icon-btn sm" data-act="delete-chapter" data-id="${esc(c.id)}" title="${esc(t("chapters.delete"))}" aria-label="${esc(t("chapters.delete"))}">${I.trash}</button>
+    </div>
+  </article>`;
+}
+
+async function moveToBook(id) {
+  const ch = S.chapters.find((c) => c.id === id);
+  if (!ch) return;
+  const name = prompt(t("home.moveAsk"), bookOf(ch));
+  if (name === null) return;
+  const book = name.trim().slice(0, 120);
+  try {
+    await S.db.setChapterBook(id, book);
+    ch.book = book;
+    if (S.chapter?.id === id) S.chapter.book = book;
+    updateChapterSelect();
+    if (S.view === "home") renderHomeList();
+  } catch (e) {
+    toast(t("chapters.renameFailed", { msg: e.message }));
+  }
+}
+
 /* ---------------- Adding a chapter ---------------- */
 
 function langOptions(list, selected, withOther) {
@@ -962,8 +1214,11 @@ function addFormHTML(first) {
     <div class="pp-form-grid">
       <div><label class="pp-label" for="add-lang">${esc(t("add.lang"))}</label>
         <select class="pp-input" id="add-lang">${langOptions(STUDY_LANGS, S.lang, true)}</select></div>
+      <div><label class="pp-label" for="add-book">${esc(t("add.book"))}</label>
+        <input class="pp-input" id="add-book" list="add-book-list" maxlength="120" value="${esc(S.view === "read" ? bookOf(S.chapter) : "")}" placeholder="${esc(t("add.bookPlaceholder"))}">
+        <datalist id="add-book-list">${[...new Set(S.chapters.map(bookOf).filter(Boolean))].map((b) => `<option value="${esc(b)}">`).join("")}</datalist></div>
       <div><label class="pp-label" for="add-title">${esc(t("add.titleLabel"))}</label>
-        <input class="pp-input" id="add-title" placeholder="${esc(t("add.titlePlaceholder"))}"></div>
+        <input class="pp-input" id="add-title" maxlength="120" placeholder="${esc(t("add.titlePlaceholder"))}"></div>
     </div>
     <label class="pp-label" for="add-text">${esc(t("add.text"))}</label>
     <textarea class="pp-textarea" id="add-text" lang="${esc(S.lang)}" placeholder="${esc(t("add.textPlaceholder"))}"></textarea>
@@ -1037,16 +1292,18 @@ async function submitChapter() {
     const sameLang = S.chapters.filter((c) => c.lang === lang).length;
     const title = (($("#add-title")?.value || "").trim() || heading || t("add.defaultTitle", { n: sameLang + 1 })).slice(0, 120);
     const position = S.chapters.reduce((m, c) => Math.max(m, c.position || 0), 0) + 1;
-    const ch = await S.db.addChapter(title, paragraphs, position, lang);
-    ch.lang = ch.lang || lang;
+    const book = ($("#add-book")?.value || "").trim().slice(0, 120);
     const st = buildStructure(paragraphs, lang);
+    const ch = await S.db.addChapter(title, paragraphs, position, lang, book, st.firstOcc.size);
+    ch.lang = ch.lang || lang;
     const known = wordsOf(lang);
     const fresh = [...st.firstOcc.keys()].filter((w) => !known.has(w));
     await S.db.registerWords(fresh, ch.id, lang);
     for (const w of fresh) setRow({ ...blankRow(w, lang), first_chapter: ch.id });
     S.chapters.push(ch);
+    S.chapterWords.set(ch.id, new Set(st.firstOcc.keys()));
     closeModal();
-    await openChapter(ch.id);
+    goChapter(ch.id);
     toast(t("add.done", { unique: st.firstOcc.size, fresh: fresh.length }));
   } catch (e) {
     toast(t("add.failed", { msg: e.message }));
@@ -1063,8 +1320,10 @@ async function renameChapter(id) {
   try {
     await S.db.renameChapter(id, title.trim());
     ch.title = title.trim();
+    if (S.chapter?.id === id) S.chapter.title = ch.title;
     updateChapterSelect();
     renderSettings();
+    if (S.view === "home") renderHomeList();
   } catch (e) {
     toast(t("chapters.renameFailed", { msg: e.message }));
   }
@@ -1078,12 +1337,19 @@ async function deleteChapter(id) {
     S.chapters = S.chapters.filter((c) => c.id !== id);
     S.chapterWords.delete(id);
     for (const r of wordsOf(ch.lang).values()) if (r.first_chapter === id) r.first_chapter = null;
-    updateChapterSelect();
-    if (S.chapter?.id === id) {
-      const next = S.chapters.filter((c) => c.lang === ch.lang).at(-1) || S.chapters.at(-1);
-      if (next) await openChapter(next.id);
-      else renderEmpty();
+    try {
+      localStorage.removeItem(posKey(id));
+    } catch {
+      /* nothing to clean */
     }
+    if (S.chapter?.id === id) {
+      S.chapter = null;
+      S.st = null;
+    }
+    if (S.settings.lastChapter === id) S.settings.lastChapter = null;
+    updateChapterSelect();
+    if (S.view === "read" && !S.chapter) goHome();
+    else if (S.view === "home") renderHome();
     renderSettings();
     toast(t("chapters.deleted"));
   } catch (e) {

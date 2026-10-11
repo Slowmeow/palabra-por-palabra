@@ -3,10 +3,12 @@ rules_version = '2';
 // Paste this into Firebase console → Firestore Database → Rules and press Publish.
 //
 // - users/{uid}: each person's chapters, words, cards and settings. Only that person.
-// - profiles/{uid}: name, email and plan for the admin panel. The plan is changed only by an admin.
+// - profiles/{uid}: name, email and plan for the admin panel. Email must be the signed-in one;
+//   the plan is changed only by an admin.
 // - admins/{uid}: created by hand in the console. Nobody can create one from the site.
-// - shared_dict, shared_cards, shared_ctx: the shared library. Everyone signed in reads it and adds to it;
-//   existing entries can't be overwritten; only the author or an admin deletes an explanation.
+// - shared_dict, shared_cards, shared_ctx: the shared library. Everyone signed in reads it; accounts with a
+//   verified email (every Google account) add to it under their own name; existing entries can't be
+//   overwritten; only the author or an admin deletes an explanation.
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() {
@@ -15,11 +17,21 @@ service cloud.firestore {
     function me() {
       return request.auth.uid;
     }
+    function verified() {
+      return signedIn() && request.auth.token.email_verified == true;
+    }
     function isAdmin() {
       return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
+    // The name shown on shared explanations: the Google display name, or the part of the email before @.
+    function myName() {
+      return request.auth.token.get("name", request.auth.token.email.split("@")[0]);
+    }
     function text(v, max) {
       return v is string && v.size() <= max;
+    }
+    function langCode(v) {
+      return v is string && v.size() <= 20 && v.matches("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*");
     }
 
     match /users/{uid}/{document=**} {
@@ -28,10 +40,18 @@ service cloud.firestore {
 
     match /profiles/{uid} {
       allow read: if signedIn() && (me() == uid || isAdmin());
-      allow create: if signedIn() && me() == uid && request.resource.data.plan == "free";
+      allow create: if signedIn() && me() == uid
+        && request.resource.data.keys().hasOnly(["name", "email", "created", "lastSeen", "plan", "planUntil", "words", "cards"])
+        && request.resource.data.plan == "free"
+        && request.resource.data.planUntil == null
+        && request.resource.data.email == request.auth.token.email
+        && text(request.resource.data.name, 100);
       allow update: if isAdmin()
         || (signedIn() && me() == uid
-            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(["plan", "planUntil"]));
+            && request.resource.data.keys().hasOnly(["name", "email", "created", "lastSeen", "plan", "planUntil", "words", "cards"])
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(["plan", "planUntil", "created"])
+            && request.resource.data.email == request.auth.token.email
+            && text(request.resource.data.name, 100));
       allow delete: if isAdmin();
     }
 
@@ -39,15 +59,19 @@ service cloud.firestore {
       allow read: if signedIn() && me() == uid;
     }
 
-    // Quick translations: { lang, xl, w: { word: "[...]" } }. Words can be added, never changed or removed.
+    // Quick translations: { lang, xl, w: { word: "[...]" } } in buckets "{lang}~{xl}~{nn}".
+    // Words can be added, never changed or removed.
     match /shared_dict/{bucket} {
       allow read: if signedIn();
-      allow create: if signedIn()
+      allow create: if verified()
         && request.resource.data.keys().hasOnly(["lang", "xl", "w"])
+        && langCode(request.resource.data.lang)
+        && langCode(request.resource.data.xl)
+        && bucket.matches(request.resource.data.lang + "~" + request.resource.data.xl + "~[0-9]{2}")
         && request.resource.data.w is map
         && request.resource.data.w.size() <= 400;
       allow update: if isAdmin()
-        || (signedIn()
+        || (verified()
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["w"])
             && request.resource.data.w.diff(resource.data.w).changedKeys().size() == 0
             && request.resource.data.w.diff(resource.data.w).removedKeys().size() == 0
@@ -55,20 +79,24 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Detailed explanations. Likes are counted with one like document per person.
+    // Detailed explanations, stored deflated in z (or as JSON text in j). Likes are counted with one
+    // like document per person.
     match /shared_cards/{id} {
       allow read: if signedIn();
-      allow create: if signedIn()
+      allow create: if verified()
         && request.resource.data.keys().hasOnly(["lang", "word", "xl", "by", "byName", "model", "created", "likes", "f", "z", "j"])
         && request.resource.data.by == me()
+        && request.resource.data.byName == myName()
         && request.resource.data.likes == 0
-        && text(request.resource.data.lang, 20)
+        && langCode(request.resource.data.lang)
+        && langCode(request.resource.data.xl)
         && text(request.resource.data.word, 100)
-        && text(request.resource.data.xl, 20)
-        && text(request.resource.data.byName, 100)
+        && text(request.resource.data.model, 60)
+        && text(request.resource.data.created, 40)
+        && request.resource.data.f in ["deflate", "json"]
         && (!("z" in request.resource.data) || (request.resource.data.z is bytes && request.resource.data.z.size() <= 16000))
         && (!("j" in request.resource.data) || text(request.resource.data.j, 24000));
-      allow update: if signedIn()
+      allow update: if verified()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["likes"])
         && (
           (request.resource.data.likes == resource.data.likes + 1
@@ -82,7 +110,8 @@ service cloud.firestore {
 
       match /likes/{uid} {
         allow read: if signedIn() && me() == uid;
-        allow create: if signedIn() && me() == uid
+        allow create: if verified() && me() == uid
+          && request.resource.data.keys().hasOnly(["at"])
           && getAfter(/databases/$(database)/documents/shared_cards/$(id)).data.likes
              == get(/databases/$(database)/documents/shared_cards/$(id)).data.likes + 1;
         allow delete: if signedIn() && me() == uid
@@ -94,13 +123,17 @@ service cloud.firestore {
     // "Why this word here" for one exact sentence. Created once, never edited.
     match /shared_ctx/{key} {
       allow read: if signedIn();
-      allow create: if signedIn()
+      allow create: if verified()
         && request.resource.data.keys().hasOnly(["lang", "xl", "word", "s", "text", "ru", "tr", "by", "created"])
         && request.resource.data.by == me()
+        && langCode(request.resource.data.lang)
+        && langCode(request.resource.data.xl)
+        && text(request.resource.data.word, 100)
         && text(request.resource.data.s, 1200)
         && text(request.resource.data.text, 3000)
         && text(request.resource.data.ru, 3000)
-        && text(request.resource.data.tr, 300);
+        && text(request.resource.data.tr, 300)
+        && text(request.resource.data.created, 40);
       allow delete: if isAdmin() || (signedIn() && resource.data.by == me());
     }
   }

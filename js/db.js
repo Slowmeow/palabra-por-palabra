@@ -1,16 +1,17 @@
 // Firebase: email sign-in and the Cloud Firestore database.
-// The SDK is loaded from Google's CDN at a fixed version; if that fails, from esm.sh.
+// The SDK is loaded from Google's own CDN at a fixed version. There is deliberately no third-party fallback:
+// whatever loads here runs with the user's session.
 //
 // Layout (everything lives under users/{uid}, see firestore.rules):
 //   meta/settings          { data }
-//   meta/chapters          { list: [{ id, title, lang, position, created_at }] }   — the chapter index
-//   chapters/{id}          { title, lang, paragraphs, position, created_at }
+//   meta/chapters          { list: [{ id, title, lang, book, words, position, created_at }] }   — the chapter index
+//   chapters/{id}          { title, lang, book, paragraphs, position, created_at }
 //   vocab/{lang}~{nn}      { lang, w: { [word]: JSON of the light row } }         — 32 buckets per language
 //   cards/{lang}|{word}    { lang, word, card, contexts, notes }                    — loaded when a word opens
 //                          card can be { ref } — a pointer to a shared explanation instead of a copy
 //
 // Shared by everyone (see firestore.rules):
-//   profiles/{uid}                    { name, email, photo, created, lastSeen, plan, planUntil, words, cards }
+//   profiles/{uid}                    { name, email, created, lastSeen, plan, planUntil, words, cards }
 //   admins/{uid}                      created by hand in the console; makes that user an admin
 //   shared_dict/{lang}~{xl}~{nn}      { lang, xl, w: { [word]: JSON [translation, pronunciation, reading, ipa, pos, lemma] } }
 //   shared_cards/{id}                 { lang, word, xl, by, byName, model, created, likes, f, z | j }  — z: deflated JSON
@@ -21,24 +22,9 @@
 // the free Spark plan allows 50,000 reads and 20,000 writes a day for the whole project.
 
 const VERSION = "12.19.0";
-const SOURCES = [
-  (m) => `https://www.gstatic.com/firebasejs/${VERSION}/firebase-${m}.js`,
-  (m) => `https://esm.sh/firebase@${VERSION}/${m}`,
-];
-
-async function loadSdk() {
-  let lastError;
-  for (const url of SOURCES) {
-    try {
-      const [app, auth, fs] = await Promise.all(["app", "auth", "firestore"].map((m) => import(url(m))));
-      return { app, auth, fs };
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  throw lastError;
-}
-const SDK = await loadSdk();
+const sdkUrl = (m) => `https://www.gstatic.com/firebasejs/${VERSION}/firebase-${m}.js`;
+const [sdkApp, sdkAuth, sdkFs] = await Promise.all(["app", "auth", "firestore"].map((m) => import(sdkUrl(m))));
+const SDK = { app: sdkApp, auth: sdkAuth, fs: sdkFs };
 
 const BUCKETS = 32;
 const SHARED_BUCKETS = 64;
@@ -70,6 +56,16 @@ async function deflate(text) {
 async function inflate(bytes) {
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
   return new Response(stream).text();
+}
+// Shared explanations come from other people: keep only the expected fields, as plain strings.
+function cleanCard(c) {
+  const out = {};
+  for (const k of CARD_KEYS) {
+    const v = c?.[k];
+    if (k === "relatives") out.relatives = Array.isArray(v) ? v.slice(0, 8).map((x) => String(x).slice(0, 200)) : [];
+    else if (v != null) out[k] = String(v).slice(0, 4000);
+  }
+  return out;
 }
 const pick = (obj, keys) => Object.fromEntries(keys.filter((k) => obj?.[k] != null && obj[k] !== "").map((k) => [k, obj[k]]));
 
@@ -121,7 +117,18 @@ export function makeDb(config) {
       if (!canDeflate) return null;
       content = JSON.parse(await inflate(d.z.toUint8Array()));
     } else content = JSON.parse(d.j || "{}");
-    return { id, lang: d.lang, word: d.word, xl: d.xl, by: d.by, byName: d.byName, model: d.model, created: d.created, likes: d.likes || 0, card: content };
+    return {
+      id,
+      lang: String(d.lang || ""),
+      word: String(d.word || ""),
+      xl: String(d.xl || ""),
+      by: String(d.by || ""),
+      byName: String(d.byName || ""),
+      model: String(d.model || ""),
+      created: String(d.created || ""),
+      likes: Math.max(0, Number(d.likes) || 0),
+      card: cleanCard(content),
+    };
   }
   const quickToRow = (q) => JSON.stringify(QUICK_KEYS.map((k) => q?.[k] || ""));
   const rowToQuick = (json, xl) => {
@@ -201,21 +208,30 @@ export function makeDb(config) {
 
     /* Chapters */
     listChapters: () => call(async () => sortChapters(await loadIndex())),
+    // Chapter text never changes after it is added, so a cached copy is as good as the server's and costs no read.
     getChapter: (id) =>
       call(async () => {
-        const snap = await F.getDoc(userDoc("chapters", id));
+        const ref = userDoc("chapters", id);
+        let snap = null;
+        try {
+          snap = await F.getDocFromCache(ref);
+        } catch {
+          /* not cached yet */
+        }
+        if (!snap?.exists()) snap = await F.getDoc(ref);
         if (!snap.exists()) throw new Error("chapter not found");
         const d = snap.data();
-        return { id, title: d.title, lang: d.lang, paragraphs: d.paragraphs };
+        const meta = (chapterIndex || []).find((c) => c.id === id);
+        return { id, title: meta?.title || d.title, lang: d.lang, book: meta?.book ?? d.book ?? "", paragraphs: d.paragraphs };
       }),
-    addChapter: (title, paragraphs, position, lang) =>
+    addChapter: (title, paragraphs, position, lang, book = "", words = 0) =>
       call(async () => {
         const list = await loadIndex();
         const id = F.doc(userCol("chapters")).id;
-        const meta = { id, title, lang, position, created_at: new Date().toISOString() };
+        const meta = { id, title, lang, book, words, position, created_at: new Date().toISOString() };
         const next = [...list, meta];
         await commitAll([
-          (b) => b.set(userDoc("chapters", id), { title, lang, paragraphs, position, created_at: meta.created_at }),
+          (b) => b.set(userDoc("chapters", id), { title, lang, book, paragraphs, position, created_at: meta.created_at }),
           (b) => b.set(indexRef(), { list: next }),
         ]);
         chapterIndex = next;
@@ -226,6 +242,15 @@ export function makeDb(config) {
         const next = (await loadIndex()).map((c) => (c.id === id ? { ...c, title } : c));
         await commitAll([
           (b) => b.set(userDoc("chapters", id), { title }, { merge: true }),
+          (b) => b.set(indexRef(), { list: next }),
+        ]);
+        chapterIndex = next;
+      }),
+    setChapterBook: (id, book) =>
+      call(async () => {
+        const next = (await loadIndex()).map((c) => (c.id === id ? { ...c, book } : c));
+        await commitAll([
+          (b) => b.set(userDoc("chapters", id), { book }, { merge: true }),
           (b) => b.set(indexRef(), { list: next }),
         ]);
         chapterIndex = next;
@@ -321,7 +346,8 @@ export function makeDb(config) {
     /* Profile and role */
     userInfo() {
       const u = auth.currentUser;
-      return { uid: u?.uid || "", email: u?.email || "", name: u?.displayName || (u?.email || "").split("@")[0], photo: u?.photoURL || "" };
+      // Must match myName() in firestore.rules: the display name, or the part of the email before @.
+      return { uid: u?.uid || "", email: u?.email || "", name: (u?.displayName || (u?.email || "").split("@")[0]).slice(0, 100) };
     },
     loadRole: () =>
       call(async () => {
@@ -334,8 +360,10 @@ export function makeDb(config) {
       call(async () => {
         const me = api.userInfo();
         const now = new Date().toISOString();
-        const data = { name: me.name, email: me.email, photo: me.photo, lastSeen: now, ...stats };
+        const data = { name: me.name, email: me.email, lastSeen: now, ...stats };
         if (!profileSeen) Object.assign(data, { created: now, plan: "free", planUntil: null });
+        // Older versions stored the profile photo; it isn't needed, so it is removed.
+        else if ("photo" in profileSeen) data.photo = F.deleteField();
         await F.setDoc(F.doc(db, "profiles", uid), data, { merge: true });
         profileSeen = { ...(profileSeen || {}), ...data };
       }),
@@ -397,7 +425,7 @@ export function makeDb(config) {
       call(async () => {
         const me = api.userInfo();
         const ref = F.doc(F.collection(db, "shared_cards"));
-        const body = { lang, word, xl, by: uid, byName: me.name.slice(0, 100), model: model || "", created: new Date().toISOString(), likes: 0, ...(await packCard(card)) };
+        const body = { lang, word, xl, by: uid, byName: me.name, model: String(model || "").slice(0, 60), created: new Date().toISOString(), likes: 0, ...(await packCard(card)) };
         await F.setDoc(ref, body);
         return ref.id;
       }),
@@ -492,13 +520,14 @@ export function makeDb(config) {
           id: String(c.id || F.doc(userCol("chapters")).id),
           title: c.title,
           lang: c.lang || "es",
+          book: String(c.book || ""),
           paragraphs: c.paragraphs || [],
           position: c.position ?? 0,
           created_at: c.created_at || new Date().toISOString(),
         }));
         const ids = new Set(chapters.map((c) => c.id));
         const index = [...(await loadIndex()).filter((c) => !ids.has(c.id)), ...chapters.map(({ paragraphs, ...meta }) => meta)];
-        const ops = chapters.map((c) => (b) => b.set(userDoc("chapters", c.id), { title: c.title, lang: c.lang, paragraphs: c.paragraphs, position: c.position, created_at: c.created_at }));
+        const ops = chapters.map((c) => (b) => b.set(userDoc("chapters", c.id), { title: c.title, lang: c.lang, book: c.book, paragraphs: c.paragraphs, position: c.position, created_at: c.created_at }));
         ops.push((b) => b.set(indexRef(), { list: index }));
         const words = (backup.words || []).map((w) => ({
           word: w.word,
