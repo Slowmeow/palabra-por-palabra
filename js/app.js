@@ -827,13 +827,22 @@ function markSelection() {
   );
 }
 
+// Scrolls a word in the reader into the visible strip: below the header and, on phones, above the bottom sheet.
+function keepVisible(el) {
+  const r = el.getBoundingClientRect();
+  const head = $(".pp-top");
+  const top = (head && getComputedStyle(head).position === "sticky" ? head.offsetHeight : 0) + 12;
+  const mobile = window.innerWidth <= MOBILE_MAX;
+  const sheet = mobile && S.panel.open ? $("#drawer")?.offsetHeight || 0 : 0;
+  const bottom = window.innerHeight - sheet - 12;
+  if (r.top >= top && r.bottom <= bottom) return;
+  const target = mobile ? top : (top + bottom - r.height) / 2;
+  window.scrollBy({ top: r.top - target, behavior: "smooth" });
+}
+
 function scrollToToken(sid, ti) {
   const el = $(`.pp-reader [data-s="${sid}"][data-i="${ti}"]`);
-  if (!el) return;
-  const r = el.getBoundingClientRect();
-  const mobile = window.innerWidth <= MOBILE_MAX;
-  const bottom = mobile ? window.innerHeight * 0.26 : window.innerHeight - 60;
-  if (r.top < 80 || r.bottom > bottom) el.scrollIntoView({ behavior: "smooth", block: mobile ? "start" : "center" });
+  if (el) keepVisible(el);
 }
 
 /* ---------------- Adding a chapter ---------------- */
@@ -1051,10 +1060,7 @@ function onWordClick(el) {
   const ti = Number(el.dataset.i);
   const inReader = !!el.closest(".pp-reader");
   selectWord(el.dataset.w, sid, ti);
-  if (inReader && window.innerWidth <= MOBILE_MAX) {
-    const r = el.getBoundingClientRect();
-    if (r.top > window.innerHeight * 0.24) window.scrollBy({ top: r.top - 84, behavior: "smooth" });
-  }
+  if (inReader && window.innerWidth <= MOBILE_MAX) keepVisible(el);
 }
 
 function selectWord(w, sid, ti) {

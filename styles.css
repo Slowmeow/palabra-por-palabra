@@ -9,7 +9,10 @@
   --card: #fffdf9;
   --ink: #211d18;
   --ink2: #5b5347;
-  --ink3: #8a8072;
+  --ink3: #766c5f;
+  --on-cob: #fff;
+  --on-level: #1b1813;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23857b6d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   --line: #e3dccd;
   --line2: #d6cdb9;
   --shadow: 0 18px 48px -24px rgba(33, 29, 24, .38);
@@ -39,7 +42,8 @@
   --card: #1c1f28;
   --ink: #eceadf;
   --ink2: #b3aea1;
-  --ink3: #837e73;
+  --ink3: #938d81;
+  --on-cob: #10131a;
   --line: #2c303b;
   --line2: #3a3f4d;
   --shadow: 0 18px 48px -20px rgba(0, 0, 0, .7);
@@ -113,7 +117,7 @@ body {
   display: grid; place-items: center;
   border-radius: 9px;
   background: var(--cob);
-  color: #fff;
+  color: var(--on-cob);
   font-family: var(--serif);
   font-style: italic;
   font-size: 19px;
@@ -148,7 +152,7 @@ body {
   color: var(--ink2);
 }
 .pp-icon-btn:hover { background: var(--bg2); color: var(--ink); }
-.pp-icon-btn.on { background: var(--cob); border-color: var(--cob); color: #fff; }
+.pp-icon-btn.on { background: var(--cob); border-color: var(--cob); color: var(--on-cob); }
 .pp-icon-btn.sm { width: 30px; height: 30px; }
 
 .pp-count {
@@ -156,10 +160,10 @@ body {
   min-width: 16px; padding: 0 4px;
   border-radius: 8px;
   background: var(--cob);
-  color: #fff;
+  color: var(--on-cob);
   font-size: 10px; line-height: 16px; text-align: center;
 }
-.pp-icon-btn.on .pp-count { background: #fff; color: var(--cob); }
+.pp-icon-btn.on .pp-count { background: var(--on-cob); color: var(--cob); }
 
 .pp-hl-btn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -239,7 +243,7 @@ body {
 .pp-wd.is-same { box-shadow: inset 0 -2px 0 var(--cob-soft); }
 .pp-wd.is-cur {
   background: var(--cob) !important;
-  color: #fff;
+  color: var(--on-cob);
   box-shadow: none;
   padding: 0 2px;
   margin: 0 -1.5px;
@@ -289,11 +293,17 @@ body {
 }
 .pp-textarea { min-height: 180px; font-family: var(--serif); font-size: 16px; line-height: 1.6; resize: vertical; }
 .pp-input:focus, .pp-textarea:focus { outline: none; border-color: var(--cob-soft); box-shadow: var(--ring); }
-select.pp-input { appearance: none; background-image: linear-gradient(transparent, transparent); }
+select.pp-input {
+  appearance: none;
+  padding-right: 34px;
+  background: var(--card) var(--chevron) no-repeat right 11px center / 15px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
 
 .pp-check { display: flex; align-items: flex-start; gap: 8px; font-size: 14px; color: var(--ink2); margin-top: 8px; }
 .pp-check input { margin-top: 3px; accent-color: var(--cob); }
-.pp-range { width: 100%; accent-color: var(--cob); }
+.pp-range { display: block; width: 100%; margin: 8px 0 4px; accent-color: var(--cob); }
 .pp-form-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
 
 .pp-primary {
@@ -302,7 +312,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
   border: 1px solid var(--cob);
   border-radius: 10px;
   background: var(--cob);
-  color: #fff;
+  color: var(--on-cob);
   font-size: 15px;
   font-weight: 500;
 }
@@ -368,7 +378,9 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
   font-size: 17px;
   flex: none;
 }
-.pp-drawer-b { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.pp-drawer-b { flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.pp-drawer-b > .pp-sec { padding-left: 18px; padding-right: 18px; }
+.pp-drawer-b > .pp-sec-first { padding-top: 16px; }
 
 @media (min-width: 760px) {
   .pp-shell.shift { margin-right: min(430px, 100%); }
@@ -379,7 +391,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
     top: auto;
     left: 0;
     width: 100%;
-    height: min(74vh, 640px);
+    height: min(68vh, 620px);
     border-left: 0;
     border-top: 1px solid var(--line);
     border-radius: 18px 18px 0 0;
@@ -387,8 +399,6 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
     padding-bottom: env(safe-area-inset-bottom);
   }
   .pp-grab { display: block; width: 42px; height: 4px; margin: 8px auto 0; border-radius: 3px; background: var(--line2); }
-  .pp-hl-btn span { display: none; }
-  .pp-brand-t { display: none; }
   .pp-hero { font-size: 28px; }
 }
 
@@ -550,10 +560,10 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
   color: var(--ink2);
   font-size: 13px;
 }
-.pp-chip-btn.on { background: var(--cob); border-color: var(--cob); color: #fff; }
-.pp-chip-btn.lv5.on { background: var(--l5); border-color: var(--l5); }
-.pp-chip-btn.lv4.on { background: var(--l4); border-color: var(--l4); }
-.pp-chip-btn.lv3.on { background: var(--l3); border-color: var(--l3); }
+.pp-chip-btn.on { background: var(--cob); border-color: var(--cob); color: var(--on-cob); }
+.pp-chip-btn.lv5.on { background: var(--l5); border-color: var(--l5); color: var(--on-level); }
+.pp-chip-btn.lv4.on { background: var(--l4); border-color: var(--l4); color: var(--on-level); }
+.pp-chip-btn.lv3.on { background: var(--l3); border-color: var(--l3); color: var(--on-level); }
 .pp-chip-btn.lv2.on { background: var(--l2); border-color: var(--l2); }
 .pp-chip-btn.lv1.on { background: var(--l1); border-color: var(--l1); }
 
@@ -592,6 +602,8 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
 .pp-seg button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
 
 .pp-ch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 14.5px; }
+.pp-ch-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.pp-ch-row .pp-row { flex: none; flex-wrap: nowrap; gap: 2px; }
 .pp-ch-row:last-child { border-bottom: 0; }
 .pp-ch-row em { color: var(--cob); font-style: normal; font-size: 12.5px; }
 
@@ -710,15 +722,49 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
 .pp-rv-levels { margin-top: 0; }
 .pp-rv-levels .pp-level i { font-style: normal; font-size: 10.5px; color: var(--ink3); margin-top: 2px; }
 
-@media (max-width: 759px) {
-  /* Phones: the chapter list gets its own row under the buttons. */
+/* ---------- Responsive header ---------- */
+/* Sized by the page column, which narrows when the side panel opens. */
+
+.pp-shell { container: shell / inline-size; }
+
+@container shell (max-width: 900px) {
+  .pp-brand-t { display: none; }
+}
+@container shell (max-width: 700px) {
+  .pp-hl-btn span { display: none; }
+  .pp-hl-btn { padding: 0 10px; }
+}
+@container shell (max-width: 600px) {
+  /* The chapter list gets its own row under the buttons. */
   .pp-top { gap: 8px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
   .pp-top .pp-brand { display: none; }
   .pp-top #chapter-picker { order: 10; flex: 1 1 100%; max-width: none; }
   .pp-actions { gap: 2px; }
-  .pp-actions .pp-icon-btn { width: 34px; height: 34px; }
-  .pp-hl-btn { height: 34px; padding: 0 9px; }
+  .pp-actions .pp-icon-btn { width: 36px; height: 36px; }
+  .pp-hl-btn { height: 36px; }
+  .pp-meta, .pp-reader, .pp-end { padding-left: 16px; padding-right: 16px; }
+  /* Justified text leaves holes on a narrow column. */
+  .pp-p { text-align: left; }
+  .pp-hero { font-size: 28px; }
+}
+
+@media (max-width: 759px) {
+  /* The bottom sheet covers most of the screen: leave room to scroll the last lines above it. */
+  .pp-shell.shift .pp-end { padding-bottom: 68vh; }
+  /* While a word is open, the header scrolls away to give the text more room. */
+  .pp-shell.shift .pp-top { position: relative; }
   .pp-rv-word { font-size: 32px; }
+  .pp-modal { padding: 12px; }
+  .pp-modal-card { max-height: 92vh; padding: 0 16px 16px; }
+  .pp-modal-card .pp-drawer-h { margin: 0 -16px; padding: 12px 16px; }
+  .pp-rv-bar { margin: 0 -16px; }
+}
+
+/* Fingers need bigger targets than a mouse. */
+@media (pointer: coarse) {
+  .pp-icon-btn.sm { width: 40px; height: 40px; }
+  .pp-occ button { padding: 8px; }
+  .pp-level { padding: 10px 3px; }
 }
 
 @media print {

@@ -4,7 +4,9 @@ A personal reader for learning languages word by word. Paste a chapter in Spanis
 
 The site is plain files with no build step. Hosting: GitHub Pages. Database and sign-in: Supabase. Both are free. Claude requests are paid separately through the API.
 
-Site address after publishing: **https://&lt;your-github-username&gt;.github.io/palabra-por-palabra/**
+Live site: **https://slowmeow.github.io/palabra-por-palabra/**
+
+If you fork it, your copy will be at `https://<your-github-username>.github.io/palabra-por-palabra/`.
 
 ---
 
