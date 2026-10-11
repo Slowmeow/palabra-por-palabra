@@ -22,6 +22,9 @@ The rest of this file is for whoever runs the site (the admin) or a fork of it.
 - **Two modes.** With your own Claude API key you translate and analyze words yourself. Without a key you read, review and use what other learners have shared.
 - **Shared library.** Quick translations and detailed analyses made with a key go to a common library (switch it off in Settings). Anyone who opens the same word sees the explanations available, with the author's name and likes, and picks one. Picking one stores only a link to it, not a copy. Editing it makes your own copy. "Why this word here" is shared for the exact same sentence, so readers of the same book benefit.
 - **Admin panel** for the site owner: users, plans (prepared for a future Pro tier) and moderation of the library.
+- **Import books** from EPUB or TXT files: chapters are found automatically and land in one book.
+- **Read aloud** with the voices built into the device, sentence by sentence, with the sentence being read highlighted.
+- **Works as an app** on a phone or computer: install it to the home screen; chapters you have opened stay readable without the internet.
 - **Backups** to a single JSON file.
 
 ---
@@ -140,6 +143,9 @@ On first start the settings move to the new models (Opus 5.5 for analysis, Haiku
 
 - **Library**: the logo or "Library" in the chapter list. Texts are grouped by language and book; the folder button on a card moves it into a book. At the end of a chapter, "Next" opens the following chapter of the same book.
 - **Add a chapter**: the plus in the header. Choose the language of the text, optionally a book, and paste it. "Join lines" helps when the text was copied from a PDF and broken into lines. Before saving you see how many words are new to you.
+- **Import a book**: in "Add text" press "EPUB or TXT file". The site lists the chapters it found (covers and tables of contents are unticked already), you pick the language and the book title, and the chapters are added as if you had pasted them. A text file without chapter headings is cut into parts of about 3,000 words. Up to 25 MB and 200 chapters per file; books with DRM can't be read. The file is read in your browser and isn't uploaded anywhere, only the chapter text is saved.
+- **Listen**: "Listen" under the chapter title reads it aloud from the selected word or the first sentence on screen, highlighting the sentence being read; the speed is next to the button. The voice comes from your device, so quality depends on it. If a language isn't read, add a voice for it in the phone's or computer's speech settings.
+- **App**: Settings → **App** → "Install the app". On iPhone use Share → Add to Home Screen. The installed app opens without the browser's address bar, updates itself with the site, and keeps already opened chapters and words readable offline; translations, analyses and sync need a connection.
 - **Languages**: the badge next to the chapter list shows the current language. Chapters of different languages are grouped in the list; opening a chapter switches the language for the vocabulary, progress and review.
 - **Levels 1–5.** Every new word starts at 5, "don't know". Tap a word and set the level with a button or keys 1–5. Arrows ← → move to the neighbouring word. Level 1 means learned, and the word stops being highlighted.
 - **Highlight**: the marker button in the header switches between all words, only unlearned ones and no highlight. The lower the level, the paler the word.
@@ -174,15 +180,19 @@ Every couple of weeks open Settings and press "Download backup": you get one JSO
 - The Anthropic key lives in your browser's `localStorage` and goes straight to Anthropic. That's fine for a personal site, but don't open the site on someone else's computer and don't paste the key where you can't remove it. If the key leaks, revoke it in the Anthropic Console with one click.
 - The Firebase web config is public by design. Never publish a service account key: it bypasses all rules.
 - Only accounts with a verified email (every Google account) can add to the shared library, and an explanation always carries its author's real Google name.
-- A Content Security Policy in `index.html` lets the page run scripts only from this site and Google's Firebase CDN and send data only to Firebase and the Claude API, so even injected text can't steal the Claude key.
+- A Content Security Policy in `index.html` lets the page run scripts only from this site, Google's Firebase CDN and reCAPTCHA (for App Check), and send data only to Firebase and the Claude API, so even injected text can't steal the Claude key.
 - Everything shown on the page from users or the shared library is escaped. Shared explanations are cleaned to the expected fields before they are shown.
-- The publishing workflow uses actions pinned to exact commits and publishes only the site's files (`index.html`, `config.js`, `styles.css`, `js/`).
-- Recommended in the Firebase and Google Cloud consoles: turn on App Check, restrict the browser API key to your site's address, and disable sign-in providers you don't use.
+- The publishing workflow uses actions pinned to exact commits and publishes only the site's files (`index.html`, `config.js`, `styles.css`, `sw.js`, `manifest.webmanifest`, `icons/`, `js/`). README, rules and workflows stay in the repository only.
+- Imported EPUB books are read as plain text: scripts, styles and images inside them are never run or shown.
+- Recommended in the Firebase and Google Cloud consoles: turn on App Check (see above), restrict the browser API key to your site's address (Google Cloud → APIs & Services → Credentials → the Browser key → Website restrictions: `slowmeow.github.io/*`, `wordanalytics-e4cb9.firebaseapp.com/*`, `localhost/*`), and disable sign-in providers you don't use.
 
 ## Files
 
 ```
 index.html             the page
+manifest.webmanifest   app name and icons for installing
+sw.js                  service worker: offline copy of the site
+icons/                 app icons
 styles.css             styles
 config.js              Firebase web config (optional, you fill it in)
 firestore.rules        database access rules to paste into Firebase
@@ -190,6 +200,7 @@ js/app.js              logic: library home, reading, levels, word panel, review,
 js/claude.js           Claude API requests, models, prompts
 js/db.js               Firebase sign-in and Firestore storage
 js/text.js             splitting text into sentences and words for any language
+js/importer.js         reading EPUB and TXT files
 js/langs.js            language profiles and external dictionaries
 js/i18n.js             interface strings (English, Russian)
 js/srs.js              spaced-repetition schedule
