@@ -23,8 +23,8 @@
 
 const VERSION = "12.19.0";
 const sdkUrl = (m) => `https://www.gstatic.com/firebasejs/${VERSION}/firebase-${m}.js`;
-const [sdkApp, sdkAuth, sdkFs] = await Promise.all(["app", "auth", "firestore"].map((m) => import(sdkUrl(m))));
-const SDK = { app: sdkApp, auth: sdkAuth, fs: sdkFs };
+const [sdkApp, sdkAuth, sdkFs, sdkAppCheck] = await Promise.all(["app", "auth", "firestore", "app-check"].map((m) => import(sdkUrl(m))));
+const SDK = { app: sdkApp, auth: sdkAuth, fs: sdkFs, appCheck: sdkAppCheck };
 
 const BUCKETS = 32;
 const SHARED_BUCKETS = 64;
@@ -78,9 +78,18 @@ function friendly(e) {
   return err;
 }
 
-export function makeDb(config) {
+// options.appCheckKey: a reCAPTCHA Enterprise site key. With it, App Check proves to Firebase that
+// requests come from this site, so scripts elsewhere can't spend the project's daily quota.
+export function makeDb(config, options = {}) {
   const { app: A, auth: Au, fs: F } = SDK;
-  const app = A.getApps().length ? A.getApp() : A.initializeApp(config);
+  const fresh = !A.getApps().length;
+  const app = fresh ? A.initializeApp(config) : A.getApp();
+  if (fresh && options.appCheckKey) {
+    SDK.appCheck.initializeAppCheck(app, {
+      provider: new SDK.appCheck.ReCaptchaEnterpriseProvider(options.appCheckKey),
+      isTokenAutoRefreshEnabled: true,
+    });
+  }
   const auth = Au.getAuth(app);
   let db;
   try {

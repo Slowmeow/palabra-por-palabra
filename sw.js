@@ -3,7 +3,7 @@
 // always go to the network and are never touched by this worker.
 const VERSION = "__BUILD__"; // replaced with the commit id when the site is published
 const CACHE = `ppp-${VERSION}`;
-const SDK = ["app", "auth", "firestore"].map((m) => `https://www.gstatic.com/firebasejs/12.19.0/firebase-${m}.js`);
+const SDK = ["app", "auth", "firestore", "app-check"].map((m) => `https://www.gstatic.com/firebasejs/12.19.0/firebase-${m}.js`);
 const SHELL = [
   "./",
   "index.html",

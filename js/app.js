@@ -326,7 +326,7 @@ export async function boot() {
       return renderMessage(t("boot.libFailed"), t("boot.libFailedText"));
     }
     try {
-      S.db = makeDb(config);
+      S.db = makeDb(config, { appCheckKey: String(CFG.APP_CHECK_KEY || "").trim() });
     } catch (e) {
       return renderSetup(t("setup.connectFailed", { msg: e.message }));
     }

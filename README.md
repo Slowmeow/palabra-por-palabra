@@ -111,6 +111,17 @@ In practice the limit you meet first is reads: roughly 1,000–2,000 visits a da
 
 Optional: Firebase indexes every field, including the compressed text of shared explanations. To save that space, add an exemption: Firestore → **Indexes** → **Single field** → **Add exemption** → collection `shared_cards`, field `z`, turn off all index types.
 
+## App Check (protection from bots)
+
+App Check makes Firebase accept requests only from this site, so a script elsewhere can't spend the project's daily quota. It is built in and switched off until a key is set:
+
+1. Google Cloud console → project `wordanalytics-e4cb9` → **Security** → **reCAPTCHA** → enable the API → **Create key**: type **Website**, domains `slowmeow.github.io` and `localhost`, no checkbox challenge. Copy the key ID.
+2. Firebase console → **App Check** → **Apps** → the web app → **reCAPTCHA Enterprise** → paste the key → **Save**.
+3. Put the key into `config.js` as `APP_CHECK_KEY` (it is public, like the Firebase config) and publish.
+4. Watch **App Check** → **APIs** → **Cloud Firestore** for a day: verified requests should be close to 100%. Then press **Enforce**.
+
+reCAPTCHA Enterprise has a free monthly allowance; a token is requested about once an hour per active user.
+
 ## Plans (prepared, not active yet)
 
 Every profile has a plan, `free` by default, which only the admin can change in the admin panel (with an optional end date). Pro doesn't unlock anything yet. The idea for later: Pro users analyze words through the owner's Claude key, without a key of their own, up to 100 analyses a month with Claude Sonnet 5.5. That needs a tiny server (for example a free Cloudflare Worker) so the owner's key never reaches the browser.

@@ -14,4 +14,6 @@ window.PPP_CONFIG = {
     messagingSenderId: "1006742687256",
     appId: "1:1006742687256:web:6b4a1f599862d0e04b3d6d",
   },
+  // App Check: the reCAPTCHA Enterprise site key (public, like the values above). Empty = App Check off.
+  APP_CHECK_KEY: "",
 };
