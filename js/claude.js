@@ -1,66 +1,47 @@
-// Запросы к Claude API прямо из браузера (ключ хранится только у вас).
+// Claude API requests straight from the browser (the key stays in your browser).
+import { t } from "./i18n.js";
+import { langInfo, englishName } from "./langs.js";
+import { wordKey } from "./text.js";
 
+const ALL_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+// off: how to switch thinking off for quick dictionary lookups (null = it cannot be switched off).
+// fallback: the model supports server-side fallback to another model if it declines a request.
 export const MODELS = [
-  {
-    id: "claude-fable-5-1",
-    name: "Claude Fable 5.1",
-    note: "самая сильная, медленнее и дороже всех",
-    inPrice: 10,
-    outPrice: 50,
-    thinking: "always",
-    efforts: ["low", "medium", "high", "xhigh", "max"],
-  },
-  {
-    id: "claude-opus-5",
-    name: "Claude Opus 5",
-    note: "очень сильная",
-    inPrice: 5,
-    outPrice: 25,
-    thinking: "adaptive",
-    efforts: ["low", "medium", "high", "xhigh", "max"],
-  },
-  {
-    id: "claude-sonnet-5",
-    name: "Claude Sonnet 5",
-    note: "быстрая и умная",
-    inPrice: 2,
-    outPrice: 10,
-    thinking: "adaptive",
-    efforts: ["low", "medium", "high", "xhigh", "max"],
-  },
-  {
-    id: "claude-haiku-4-5-20251001",
-    name: "Claude Haiku 4.5",
-    note: "самая быстрая и дешёвая",
-    inPrice: 1,
-    outPrice: 5,
-    thinking: "manual",
-    efforts: null,
-  },
+  { id: "claude-fable-5-1", name: "Claude Fable 5.1", inPrice: 10, outPrice: 50, thinking: "adaptive", off: null, efforts: ALL_EFFORTS, fallback: true },
+  { id: "claude-opus-5-5", name: "Claude Opus 5.5", inPrice: 4, outPrice: 20, thinking: "adaptive", off: null, efforts: ALL_EFFORTS, fallback: true },
+  { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", inPrice: 2, outPrice: 10, thinking: "adaptive", off: { type: "between_tools" }, efforts: ALL_EFFORTS, fallback: true },
+  { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", inPrice: 0.1, outPrice: 0.5, thinking: "adaptive", off: { type: "disabled" }, efforts: ALL_EFFORTS, fallback: false },
+  { id: "claude-opus-5", name: "Claude Opus 5", inPrice: 5, outPrice: 25, thinking: "adaptive", off: { type: "disabled" }, efforts: ALL_EFFORTS, fallback: true, legacy: true },
+  { id: "claude-sonnet-5", name: "Claude Sonnet 5", inPrice: 2, outPrice: 10, thinking: "adaptive", off: { type: "disabled" }, efforts: ALL_EFFORTS, fallback: false, legacy: true },
+  { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", inPrice: 1, outPrice: 5, thinking: "manual", off: null, efforts: null, fallback: false, legacy: true },
 ];
+const ALIASES = { "claude-haiku-4-5-20251001": "claude-haiku-4-5" };
 
-export const EFFORTS = {
-  low: "низкое",
-  medium: "среднее",
-  high: "высокое",
-  xhigh: "очень высокое",
-  max: "максимальное",
-};
-const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
+export const EFFORT_ORDER = ALL_EFFORTS;
 const MAX_TOKENS = { low: 8000, medium: 16000, high: 32000, xhigh: 64000, max: 64000 };
+const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
-export const FACT_TYPES = ["смешной", "грустный", "жуткий", "удивительный", "исторический"];
+export const FACT_TYPES = ["funny", "sad", "creepy", "surprising", "historical"];
+// Cards made by older versions used Russian fact types.
+const LEGACY_FACTS = { смешной: "funny", грустный: "sad", жуткий: "creepy", удивительный: "surprising", исторический: "historical" };
+export const factKey = (v) => {
+  const k = String(v || "").toLowerCase();
+  return FACT_TYPES.includes(k) ? k : LEGACY_FACTS[k] || "surprising";
+};
 
 export function modelInfo(id) {
+  const real = ALIASES[id] || id;
   return (
-    MODELS.find((m) => m.id === id) || {
+    MODELS.find((m) => m.id === real) || {
       id,
       name: id,
-      note: "своя модель",
       inPrice: 0,
       outPrice: 0,
       thinking: "unknown",
+      off: null,
       efforts: null,
+      fallback: false,
       custom: true,
     }
   );
@@ -79,12 +60,12 @@ export function costUsd(modelId, usage) {
   return (input * m.inPrice + (usage?.output_tokens || 0) * m.outPrice) / 1e6;
 }
 
-// Очень грубая оценка одного разбора слова: для подсказки, не для бухгалтерии.
+// A very rough estimate of one word analysis: a hint, not accounting.
 export function estimateCardCost(modelId, effort) {
   const m = modelInfo(modelId);
   const thinkingGuess = { low: 400, medium: 900, high: 1800, xhigh: 3500, max: 6000 }[effort] ?? 0;
   const extra = m.efforts ? thinkingGuess : 0;
-  return (1100 * m.inPrice + (900 + extra) * m.outPrice) / 1e6;
+  return (1200 * m.inPrice + (950 + extra) * m.outPrice) / 1e6;
 }
 
 export class ClaudeError extends Error {
@@ -97,56 +78,63 @@ export class ClaudeError extends Error {
 
 function humanize(status, message) {
   const m = String(message || "");
-  if (/credit balance|billing/i.test(m)) return "На балансе Claude API закончились деньги. Пополните его в консоли Claude.";
-  if (status === 401) return "API-ключ Anthropic не подошёл. Проверьте его в настройках.";
-  if (status === 403) return "У этого ключа нет доступа к выбранной модели.";
-  if (status === 404) return "Модель не найдена. Проверьте её название в настройках.";
-  if (status === 429) return "Слишком много запросов подряд. Подождите минуту и повторите.";
-  if (status === 529 || status === 503) return "Серверы Claude сейчас перегружены. Повторите чуть позже.";
-  return `Ошибка Claude API (${status || "сеть"}): ${m}`;
+  if (/credit balance|billing/i.test(m)) return t("api.credit");
+  if (status === 401) return t("api.401");
+  if (status === 403) return t("api.403");
+  if (status === 404) return t("api.404");
+  if (status === 429) return t("api.429");
+  if (status === 529 || status === 503) return t("api.overloaded");
+  return t("api.other", { status: status || t("api.network"), msg: m });
 }
 
-function headers(apiKey) {
-  return {
+function headers(apiKey, betas = []) {
+  const h = {
     "content-type": "application/json",
     "x-api-key": apiKey,
     "anthropic-version": "2023-06-01",
     "anthropic-dangerous-direct-browser-access": "true",
   };
+  if (betas.length) h["anthropic-beta"] = betas.join(",");
+  return h;
+}
+
+async function errorMessage(res) {
+  try {
+    return (await res.json())?.error?.message || "";
+  } catch {
+    return "";
+  }
 }
 
 export async function checkKey(apiKey) {
   const res = await fetch("https://api.anthropic.com/v1/models?limit=1", { headers: headers(apiKey) });
   if (res.ok) return true;
-  let msg = "";
-  try {
-    msg = (await res.json())?.error?.message || "";
-  } catch {
-    /* пусто */
-  }
-  throw new ClaudeError(humanize(res.status, msg), res.status);
+  throw new ClaudeError(humanize(res.status, await errorMessage(res)), res.status);
 }
 
-// Потоковый запрос: разбирает события SSE, копит текст и краткий ход размышлений.
-export async function callClaude({ apiKey, body, signal, onThinking, onText }) {
+// If the account cannot use server-side fallback, stop asking for it for the rest of the session.
+let fallbackRejected = false;
+
+// Streaming request: parses SSE events, collects the text and the short thinking summary.
+export async function callClaude({ apiKey, body, betas = [], signal, onThinking, onText }) {
   let res;
   try {
     res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: headers(apiKey),
+      headers: headers(apiKey, betas),
       body: JSON.stringify({ ...body, stream: true }),
       signal,
     });
   } catch (e) {
     if (e?.name === "AbortError") throw e;
-    throw new ClaudeError("Нет связи с Claude API. Проверьте интернет.", 0, "network");
+    throw new ClaudeError(t("api.offline"), 0, "network");
   }
   if (!res.ok) {
-    let msg = "";
-    try {
-      msg = (await res.json())?.error?.message || "";
-    } catch {
-      /* пусто */
+    const msg = await errorMessage(res);
+    if (res.status === 400 && body.fallbacks && /fallback/i.test(msg)) {
+      fallbackRejected = true;
+      const { fallbacks, ...rest } = body;
+      return callClaude({ apiKey, body: rest, betas: betas.filter((b) => b !== FALLBACK_BETA), signal, onThinking, onText });
     }
     throw new ClaudeError(humanize(res.status, msg), res.status);
   }
@@ -157,6 +145,7 @@ export async function callClaude({ apiKey, body, signal, onThinking, onText }) {
   let text = "";
   let thinking = "";
   let stopReason = null;
+  let model = body.model;
   const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
   const takeUsage = (u) => {
     if (!u) return;
@@ -166,7 +155,12 @@ export async function callClaude({ apiKey, body, signal, onThinking, onText }) {
   const handle = (evt) => {
     switch (evt.type) {
       case "message_start":
+        if (evt.message?.model) model = evt.message.model;
         takeUsage(evt.message?.usage);
+        break;
+      case "content_block_start":
+        // Server-side fallback: another model continues the answer.
+        if (evt.content_block?.type === "fallback" && evt.content_block.to?.model) model = evt.content_block.to.model;
         break;
       case "content_block_delta":
         if (evt.delta?.type === "text_delta") {
@@ -211,21 +205,22 @@ export async function callClaude({ apiKey, body, signal, onThinking, onText }) {
       handle(evt);
     }
   }
-  return { text, thinking, usage, stopReason };
+  return { text, thinking, usage, stopReason, model };
 }
 
-function buildBody({ model, purpose, effort, showThinking, haikuThinking, prompt, schema, maxTokens }) {
+function buildRequest({ model, purpose, effort, showThinking, haikuThinking, prompt, schema, maxTokens }) {
   const info = modelInfo(model);
   const body = { model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] };
+  const betas = [];
   const output = {};
   if (schema) output.format = { type: "json_schema", schema };
 
   if (purpose === "dictionary") {
-    if (info.thinking === "adaptive") body.thinking = { type: "disabled" };
     if (info.efforts) output.effort = "low";
+    if (info.off) body.thinking = info.off;
   } else {
     if (info.efforts && effort) output.effort = effort;
-    if ((info.thinking === "adaptive" || info.thinking === "always") && showThinking) {
+    if (info.thinking === "adaptive" && showThinking) {
       body.thinking = { type: "adaptive", display: "summarized" };
     } else if (info.thinking === "manual" && haikuThinking) {
       body.thinking = { type: "enabled", budget_tokens: 6000 };
@@ -233,16 +228,16 @@ function buildBody({ model, purpose, effort, showThinking, haikuThinking, prompt
     }
   }
   if (Object.keys(output).length) body.output_config = output;
-  return body;
+  if (info.fallback && !fallbackRejected) {
+    body.fallbacks = "default";
+    betas.push(FALLBACK_BETA);
+  }
+  return { body, betas };
 }
 
-function finish(r, model) {
-  if (r.stopReason === "refusal") {
-    throw new ClaudeError("Модель отказалась отвечать на этот запрос. Попробуйте другую модель.", 200, "refusal");
-  }
-  if (r.stopReason === "max_tokens") {
-    throw new ClaudeError("Ответ оборвался: не хватило лимита токенов. Попробуйте уровень размышления пониже.", 200, "max_tokens");
-  }
+function finish(r, requested) {
+  if (r.stopReason === "refusal") throw new ClaudeError(t("api.refusal"), 200, "refusal");
+  if (r.stopReason === "max_tokens") throw new ClaudeError(t("api.maxTokens"), 200, "max_tokens");
   let data;
   try {
     data = JSON.parse(r.text);
@@ -252,13 +247,14 @@ function finish(r, model) {
     try {
       data = JSON.parse(r.text.slice(a, b + 1));
     } catch {
-      throw new ClaudeError("Ответ модели пришёл не в формате JSON. Повторите запрос.", 200, "parse");
+      throw new ClaudeError(t("api.notJson"), 200, "parse");
     }
   }
+  const model = r.model || requested;
   return { data, usage: r.usage, cost: costUsd(model, r.usage), model };
 }
 
-/* ---------- Схемы ответов ---------- */
+/* ---------- Response schemas ---------- */
 
 const str = { type: "string" };
 
@@ -269,6 +265,7 @@ export const CARD_SCHEMA = {
     translation: str,
     pos: str,
     pronunciation: str,
+    reading: str,
     ipa: str,
     sentence_translation: str,
     context: str,
@@ -280,7 +277,7 @@ export const CARD_SCHEMA = {
     mnemonic: str,
   },
   required: [
-    "lemma", "translation", "pos", "pronunciation", "ipa", "sentence_translation",
+    "lemma", "translation", "pos", "pronunciation", "reading", "ipa", "sentence_translation",
     "context", "etymology", "history", "fact_type", "fact", "relatives", "mnemonic",
   ],
   additionalProperties: false,
@@ -293,8 +290,8 @@ const DICT_SCHEMA = {
       type: "array",
       items: {
         type: "object",
-        properties: { word: str, translation: str, pronunciation: str, ipa: str, pos: str, lemma: str },
-        required: ["word", "translation", "pronunciation", "ipa", "pos", "lemma"],
+        properties: { word: str, translation: str, pronunciation: str, reading: str, ipa: str, pos: str, lemma: str },
+        required: ["word", "translation", "pronunciation", "reading", "ipa", "pos", "lemma"],
         additionalProperties: false,
       },
     },
@@ -310,130 +307,152 @@ const CONTEXT_SCHEMA = {
   additionalProperties: false,
 };
 
-/* ---------- Промпты ---------- */
+/* ---------- Prompts ---------- */
 
-function cardPrompt({ surface, sentence, context, wish }) {
-  return `Ты — увлечённый преподаватель испанского и историк языка. Твой ученик говорит по-русски и учит испанский, читая книгу слово за словом. Он нажал на слово в тексте. Объясни это слово так, чтобы оно запомнилось надолго.
-
-Слово (как в тексте): «${surface}»
-Предложение, где оно стоит: «${sentence}»
-Фрагмент вокруг: «${context}»
-
-Заполни поля ответа:
-- lemma: словарная форма (инфинитив для глагола, ед. ч. м. р. для прилагательного)
-- translation: перевод на русский именно в этом значении, 1–4 слова
-- pos: часть речи и форма коротко, например «глагол, претерито, 3 л. ед. ч.»
-- pronunciation: произношение русскими буквами, ударный слог заглавными, например «су-фри-МЬЕН-то»
-- ipa: транскрипция МФА (кастильское произношение)
-- sentence_translation: перевод всего предложения на русский
-- context: 1–2 предложения — почему здесь стоит именно это слово или эта форма, что оно делает в предложении и в сцене, какой оттенок даёт
-- etymology: 1–2 предложения — язык-источник и цепочка форм
-- history: 2–3 предложения — как менялось значение, как слово или его корень жили в культуре
-- fact_type: смешной, грустный, жуткий, удивительный или исторический
-- fact: 1–2 предложения — один запоминающийся правдивый факт о слове или корне
-- relatives: 2–4 родственных или похожих слова в русском, английском или других языках, с пометкой языка, например «suffer (англ.)»
-- mnemonic: одна короткая яркая ассоциация, чтобы запомнить слово
-
-Правила:
-- Пиши по-русски, живо и конкретно, без воды.
-- Не выдумывай. Если яркого проверенного факта о самом слове нет, дай настоящий факт о его корне, родственниках или употреблении. Не придумывай цитаты и точные даты. Если в чём-то не уверен, коротко так и скажи.
-- Для служебных слов (артикли, предлоги, союзы, местоимения) расскажи, из какого латинского слова они выросли и какую роль играют.
-- Для имён собственных объясни, что это имя, как оно устроено и что может значить, с оговоркой, если точно неизвестно.
-- Текст может быть переводом с другого языка — тогда в context можно говорить о выборе переводчика.${
-    wish ? `\n\nПожелание ученика к этому разбору: ${wish}` : ""
-  }`;
+function names(lang, xl) {
+  const p = langInfo(lang);
+  const L = englishName(lang);
+  const X = englishName(xl);
+  return {
+    p,
+    L,
+    X,
+    pron: p.pron
+      ? p.pron(X)
+      : `a simple respelling that a ${X} speaker can read, in ${X} script, syllables separated by hyphens, the stressed syllable in CAPITALS`,
+    reading: p.reading ? `the reading of the word in ${p.reading}` : "an empty string",
+    ipa: `IPA transcription (${p.ipa || `standard ${L}`})`,
+  };
 }
 
-function dictPrompt(items) {
+function cardPrompt({ lang, xl, surface, sentence, context, wish }) {
+  const n = names(lang, xl);
+  return `You are an enthusiastic ${n.L} teacher and a historian of language. Your student reads a book in ${n.L} word by word and wants every explanation in ${n.X}. They tapped a word in the text. Explain it so that it sticks for a long time.
+
+Word (as it appears in the text): «${surface}»
+Sentence it appears in: «${sentence}»
+Surrounding passage: «${context}»
+
+Fill in the fields:
+- lemma: the dictionary form (infinitive for verbs, base form for adjectives and nouns)
+- translation: ${n.X} translation of the word in this exact sense, 1–4 words
+- pos: part of speech and grammatical form, briefly, in ${n.X}
+- pronunciation: ${n.pron}
+- reading: ${n.reading}
+- ipa: ${n.ipa}
+- sentence_translation: translation of the whole sentence into ${n.X}
+- context: 1–2 sentences — why this word or this form is used here, what it does in the sentence and in the scene, what shade of meaning it adds
+- etymology: 1–2 sentences — the source language and the chain of forms
+- history: 2–3 sentences — how the meaning changed, how the word or its root lived in culture
+- fact_type: one of funny, sad, creepy, surprising, historical
+- fact: 1–2 sentences — one memorable, true fact about the word or its root
+- relatives: 2–4 related or similar words in ${n.X}, English or other languages, each with its language named in ${n.X}, e.g. "suffer (English)"
+- mnemonic: one short, vivid association to remember the word
+
+Rules:
+- Write every explanatory field in ${n.X}. Quote ${n.L} words as they are.
+- Be lively and concrete, no filler.
+- Do not invent anything. If there is no striking verified fact about the word itself, give a real fact about its root, its relatives or its use. Do not make up quotes or exact dates. If you are unsure about something, say so briefly.
+- For function words (articles, prepositions, conjunctions, pronouns, particles), explain what they grew out of and what role they play.
+- For proper names, explain what kind of name it is, how it is built and what it may mean, with a caveat if this is uncertain.
+- The text may be a translation from another language; then the context field may discuss the translator's choice.${
+    n.p.hint ? `\n- ${n.p.hint}` : ""
+  }${wish ? `\n\nThe student's wish for this explanation: ${wish}` : ""}`;
+}
+
+function dictPrompt({ lang, xl, items }) {
+  const n = names(lang, xl);
   const list = items.map((it, i) => `${i + 1}. ${it.word} — «${it.sentence}»`).join("\n");
-  return `Ты — испанско-русский словарь для ученика, который читает художественный текст.
-Для каждого слова дай короткую словарную статью. Рядом со словом стоит предложение, где оно встретилось: по нему выбирай главное значение.
+  return `You are a ${n.L}–${n.X} dictionary for a learner who reads fiction in ${n.L}.
+Give a short dictionary entry for every word. Each word comes with the sentence where it appeared: use it to choose the main sense.
 
-Поля:
-- word: слово точно как в списке
-- translation: 1–3 перевода на русский через запятую, первым — значение из этого предложения
-- pronunciation: произношение русскими буквами, ударный слог заглавными
-- ipa: транскрипция МФА (кастильское произношение)
-- pos: часть речи и форма коротко
-- lemma: словарная форма
+Fields:
+- word: the word exactly as in the list
+- translation: 1–3 ${n.X} translations separated by commas, the sense from this sentence first
+- pronunciation: ${n.pron}
+- reading: ${n.reading}
+- ipa: ${n.ipa}
+- pos: part of speech and form, briefly, in ${n.X}
+- lemma: the dictionary form
 
-Для имён собственных в translation напиши русскую передачу имени и пометку «имя».
-Верни все ${items.length} слов в том же порядке, ничего не пропускай.
+For proper names, put the usual ${n.X} rendering of the name in translation and mark it as a name, in ${n.X}.
+Return all ${items.length} words in the same order and skip nothing.
 
-Слова:
+Words:
 ${list}`;
 }
 
-function contextPrompt({ surface, lemma, translation, sentence, context }) {
-  return `Ты — преподаватель испанского для русскоязычного ученика, который читает книгу слово за словом.
-Слово: «${surface}» (словарная форма: ${lemma || surface}; основное значение: ${translation || "—"}).
-Предложение: «${sentence}»
-Фрагмент вокруг: «${context}»
+function contextPrompt({ lang, xl, surface, lemma, translation, sentence, context }) {
+  const n = names(lang, xl);
+  return `You are a ${n.L} teacher for a student who reads a book word by word and wants explanations in ${n.X}.
+Word: «${surface}» (dictionary form: ${lemma || surface}; main meaning: ${translation || "—"}).
+Sentence: «${sentence}»
+Surrounding passage: «${context}»
 
-Заполни поля:
-- context: 1–2 предложения по-русски — почему здесь стоит именно это слово или эта форма, что оно делает в этом предложении и в сцене, какой оттенок даёт. Если значение здесь отличается от основного, скажи об этом.
-- translation: перевод слова именно в этом месте, 1–4 слова
-- sentence_translation: перевод всего предложения на русский`;
+Fill in the fields, in ${n.X}:
+- context: 1–2 sentences — why this word or this form is used here, what it does in this sentence and in the scene, what shade of meaning it adds. If the meaning here differs from the main one, say so.
+- translation: translation of the word in this exact place, 1–4 words
+- sentence_translation: translation of the whole sentence`;
 }
 
-/* ---------- Публичные функции ---------- */
+/* ---------- Public functions ---------- */
 
-export async function generateCard({ apiKey, settings, surface, sentence, context, wish, signal, onThinking }) {
+export async function generateCard({ apiKey, settings, lang, xl, surface, sentence, context, wish, signal, onThinking }) {
   const model = settings.cardModel;
   const info = modelInfo(model);
   const effort = info.efforts ? settings.cardEffort : null;
-  const body = buildBody({
+  const { body, betas } = buildRequest({
     model,
     purpose: "card",
     effort,
     showThinking: settings.showThinking,
     haikuThinking: settings.haikuThinking,
-    prompt: cardPrompt({ surface, sentence, context, wish }),
+    prompt: cardPrompt({ lang, xl, surface, sentence, context, wish }),
     schema: CARD_SCHEMA,
     maxTokens: effort ? MAX_TOKENS[effort] : 8000,
   });
-  const r = await callClaude({ apiKey, body, signal, onThinking });
-  const out = finish(r, model);
+  const out = finish(await callClaude({ apiKey, body, betas, signal, onThinking }), model);
   out.effort = effort;
   return out;
 }
 
-export async function explainContext({ apiKey, settings, surface, lemma, translation, sentence, context, signal }) {
+export async function explainContext({ apiKey, settings, lang, xl, surface, lemma, translation, sentence, context, signal }) {
   const model = settings.cardModel;
   const info = modelInfo(model);
   const effort = info.efforts ? capEffort(settings.cardEffort, "medium") : null;
-  const body = buildBody({
+  const { body, betas } = buildRequest({
     model,
     purpose: "context",
     effort,
-    showThinking: false,
-    haikuThinking: false,
-    prompt: contextPrompt({ surface, lemma, translation, sentence, context }),
+    prompt: contextPrompt({ lang, xl, surface, lemma, translation, sentence, context }),
     schema: CONTEXT_SCHEMA,
     maxTokens: effort ? MAX_TOKENS[effort] : 4000,
   });
-  return finish(await callClaude({ apiKey, body, signal }), model);
+  return finish(await callClaude({ apiKey, body, betas, signal }), model);
 }
 
-export async function lookupWords({ apiKey, model, items, signal }) {
-  const body = buildBody({
+// items: [{ word: surface form, sentence }]. Returns a map keyed by wordKey().
+export async function lookupWords({ apiKey, model, lang, xl, items, signal }) {
+  const { body, betas } = buildRequest({
     model,
     purpose: "dictionary",
-    prompt: dictPrompt(items),
+    prompt: dictPrompt({ lang, xl, items }),
     schema: DICT_SCHEMA,
-    maxTokens: Math.min(32000, 1500 + items.length * 160),
+    maxTokens: Math.min(32000, 1500 + items.length * 180),
   });
-  const out = finish(await callClaude({ apiKey, body, signal }), model);
+  const out = finish(await callClaude({ apiKey, body, betas, signal }), model);
   const map = new Map();
   for (const it of out.data.items || []) {
-    const key = String(it.word || "").toLocaleLowerCase("es").trim();
+    const key = wordKey(String(it.word || "").trim(), lang);
     if (!key) continue;
     map.set(key, {
       translation: it.translation || "",
       pronunciation: it.pronunciation || "",
+      reading: it.reading || "",
       ipa: it.ipa || "",
       pos: it.pos || "",
       lemma: it.lemma || "",
+      xl,
     });
   }
   return { map, cost: out.cost, usage: out.usage };

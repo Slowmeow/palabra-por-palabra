@@ -1,4 +1,4 @@
-/* Palabra por palabra — оформление */
+/* Palabra por palabra — styles */
 
 :root {
   --cob: #2344a0;
@@ -18,7 +18,7 @@
   --serif: "Alegreya", Georgia, "Times New Roman", serif;
   --sans: "Alegreya Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 
-  /* Уровни: 5 — самый яркий, 1 — выученное */
+  /* Levels: 5 is the brightest, 1 is learned */
   --l5: #b8801f;
   --l4: #a98a3f;
   --l3: #8d8b5c;
@@ -56,6 +56,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 html { -webkit-text-size-adjust: 100%; }
 
@@ -88,7 +89,7 @@ body {
 .pp-spin { display: inline-flex; animation: pp-rot 1s linear infinite; }
 @keyframes pp-rot { to { transform: rotate(360deg); } }
 
-/* ---------- Шапка ---------- */
+/* ---------- Header ---------- */
 
 .pp-shell { min-height: 100vh; transition: margin-right .28s cubic-bezier(.22, .61, .36, 1); }
 .pp-shell.shift { margin-right: 0; }
@@ -182,7 +183,7 @@ body {
   white-space: nowrap;
 }
 
-/* ---------- Читалка ---------- */
+/* ---------- Reader ---------- */
 
 .pp-meta {
   max-width: 760px;
@@ -255,7 +256,7 @@ body {
   font-size: 14px;
 }
 
-/* ---------- Пустой экран и формы ---------- */
+/* ---------- Empty state and forms ---------- */
 
 .pp-empty { max-width: 720px; margin: 0 auto; padding: 40px 20px 90px; }
 .pp-empty-in { display: grid; gap: 14px; }
@@ -319,7 +320,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
 }
 .pp-soft-btn:hover { color: var(--ink); border-color: var(--cob-soft); }
 
-/* ---------- Вход ---------- */
+/* ---------- Sign-in ---------- */
 
 .pp-auth { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
 .pp-auth-card {
@@ -340,7 +341,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
   font-size: 14px;
 }
 
-/* ---------- Панель ---------- */
+/* ---------- Panel ---------- */
 
 .pp-drawer {
   position: fixed;
@@ -391,7 +392,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
   .pp-hero { font-size: 28px; }
 }
 
-/* ---------- Слово ---------- */
+/* ---------- Word ---------- */
 
 .pp-wv { padding: 16px 16px 60px; }
 .pp-pad { padding: 16px; }
@@ -492,7 +493,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
 .pp-fact { padding: 12px 14px; border-radius: 12px; background: var(--bg2); border-left: 3px solid var(--ochre); }
 .pp-fact[data-k="sad"] { border-left-color: var(--l2); }
 .pp-fact[data-k="creepy"] { border-left-color: #7a5a8e; }
-.pp-fact[data-k="hist"] { border-left-color: var(--cob); }
+.pp-fact[data-k="historical"] { border-left-color: var(--cob); }
 .pp-fact-h { display: flex; align-items: center; gap: 7px; font-family: var(--serif); font-weight: 700; font-size: 14px; color: var(--ink2); margin-bottom: 5px; }
 .pp-fact-emoji { font-size: 16px; }
 
@@ -526,7 +527,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
 .pp-fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 14px; margin-top: 14px; }
 .pp-fieldset legend { padding: 0 6px; font-size: 13px; color: var(--ink3); }
 
-/* ---------- Словарь и прогресс ---------- */
+/* ---------- Vocabulary and progress ---------- */
 
 .pp-vocab { padding: 14px 16px 60px; }
 .pp-search input {
@@ -594,7 +595,7 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
 .pp-ch-row:last-child { border-bottom: 0; }
 .pp-ch-row em { color: var(--cob); font-style: normal; font-size: 12.5px; }
 
-/* ---------- Модальное окно и уведомления ---------- */
+/* ---------- Modal and toast ---------- */
 
 .pp-modal {
   position: fixed; inset: 0; z-index: 60;
@@ -627,6 +628,97 @@ select.pp-input { appearance: none; background-image: linear-gradient(transparen
   color: var(--bg);
   font-size: 14px;
   box-shadow: var(--shadow);
+}
+
+/* ---------- Languages ---------- */
+
+.pp-lang-badge {
+  flex: none;
+  min-width: 30px;
+  padding: 4px 6px;
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  color: var(--cob);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  text-align: center;
+}
+.pp-lang-badge:empty { display: none; }
+
+.pp-lang-tag {
+  display: inline-block;
+  min-width: 24px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--ink3);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.pp-ui-switch { display: flex; gap: 12px; justify-content: center; margin-top: 18px; font-size: 13px; }
+.pp-ui-switch .pp-link { color: var(--ink3); text-decoration: none; }
+.pp-ui-switch .pp-link.on { color: var(--cob); font-weight: 700; }
+
+.pp-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 0 12px; }
+@media (max-width: 520px) { .pp-form-grid { grid-template-columns: 1fr; } }
+
+.pp-panel-lang { margin-bottom: 8px; }
+.pp-card-xl { margin-top: 12px; }
+
+/* Japanese, Chinese, Thai: no spaces between words, so keep a hairline gap between highlights. */
+.pp-reader.is-cjk { line-height: 1.95; }
+.pp-reader.is-cjk .pp-wd { margin: 0 1px; padding: 0; }
+.pp-reader.is-cjk .pp-p { text-align: left; }
+[dir="rtl"].pp-reader .pp-p { text-align: right; }
+
+/* ---------- Review ---------- */
+
+.pp-rv { width: min(560px, 100%); }
+.pp-rv .pp-drawer-h { gap: 12px; }
+.pp-rv .pp-drawer-h > span:first-child { flex: 1; }
+.pp-rv-count { color: var(--ink3); font-family: var(--sans); font-size: 13px; }
+.pp-rv-bar { height: 3px; margin: 0 -18px; background: var(--bg2); }
+.pp-rv-bar i { display: block; height: 100%; background: var(--cob); transition: width .2s; }
+
+.pp-rv-start { display: grid; gap: 14px; justify-items: start; padding-top: 16px; }
+.pp-rv-stats { display: flex; gap: 28px; }
+.pp-rv-stats div { display: grid; }
+.pp-rv-stats b { font-family: var(--serif); font-size: 34px; font-weight: 500; line-height: 1.1; }
+.pp-rv-stats span { color: var(--ink3); font-size: 13px; }
+.pp-rv-done { font-family: var(--serif); font-size: 26px; font-weight: 500; }
+
+.pp-rv-card { display: grid; gap: 14px; padding-top: 18px; }
+.pp-rv-word {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  font-family: var(--serif);
+  font-size: 38px;
+  font-weight: 500;
+  line-height: 1.2;
+  word-break: break-word;
+  text-align: center;
+}
+.pp-rv-sent { flex: none; font-size: 17px; }
+.pp-rv-mark { background: var(--l5-bg); color: inherit; border-radius: 4px; padding: 0 2px; box-shadow: inset 0 -2px 0 var(--ochre); }
+.pp-rv-show { justify-self: center; min-width: 200px; }
+.pp-rv-card > .pp-hint { text-align: center; }
+.pp-rv-answer { display: grid; gap: 6px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); }
+.pp-rv-answer .pp-chips { margin-top: 2px; }
+.pp-rv-answer .pp-mn { margin-top: 6px; }
+.pp-rv-levels { margin-top: 0; }
+.pp-rv-levels .pp-level i { font-style: normal; font-size: 10.5px; color: var(--ink3); margin-top: 2px; }
+
+@media (max-width: 759px) {
+  /* Phones: the chapter list gets its own row under the buttons. */
+  .pp-top { gap: 8px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
+  .pp-top .pp-brand { display: none; }
+  .pp-top #chapter-picker { order: 10; flex: 1 1 100%; max-width: none; }
+  .pp-actions { gap: 2px; }
+  .pp-actions .pp-icon-btn { width: 34px; height: 34px; }
+  .pp-hl-btn { height: 34px; padding: 0 9px; }
+  .pp-rv-word { font-size: 32px; }
 }
 
 @media print {

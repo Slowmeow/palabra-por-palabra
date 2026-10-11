@@ -1,11 +1,11 @@
-// Подключение к вашей базе Supabase.
-// Оба значения можно публиковать: без логина и пароля они не дают доступа к данным.
-// Где взять: Supabase → ваш проект → кнопка Connect (или Project Settings → API Keys).
+// Connection to your Supabase database.
+// Both values are safe to publish: without an email and password they give no access to data.
+// Where to find them: Supabase → your project → Connect button (or Project Settings → API Keys).
 //
-// ВНИМАНИЕ: сюда НЕЛЬЗЯ вставлять API-ключ Anthropic (sk-ant-...).
-// Его вводят только в настройках самого сайта, он хранится в вашем браузере.
+// WARNING: never put your Anthropic API key (sk-ant-...) here.
+// It is entered in the site's own Settings and stays in your browser.
 
 window.PPP_CONFIG = {
-  SUPABASE_URL: "",               // например: "https://abcdefghijkl.supabase.co"
-  SUPABASE_PUBLISHABLE_KEY: "",   // например: "sb_publishable_..."
+  SUPABASE_URL: "",               // for example: "https://abcdefghijkl.supabase.co"
+  SUPABASE_PUBLISHABLE_KEY: "",   // for example: "sb_publishable_..."
 };

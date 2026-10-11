@@ -1,15 +1,18 @@
 name: Ping Supabase
 
-# Бесплатный проект Supabase засыпает после недели без обращений.
-# Этот запрос раз в три дня держит его живым.
-# Чтобы он заработал, добавьте в репозитории Settings → Secrets and variables → Actions:
-#   SUPABASE_URL              — например https://xxxx.supabase.co
-#   SUPABASE_PUBLISHABLE_KEY  — publishable key (не секретный!)
+# A free Supabase project pauses after a week without requests.
+# This request every three days keeps it awake.
+# To make it work, add in the repository Settings → Secrets and variables → Actions:
+#   SUPABASE_URL              — for example https://xxxx.supabase.co
+#   SUPABASE_PUBLISHABLE_KEY  — the publishable key (not a secret one!)
 
 on:
   schedule:
     - cron: "17 6 */3 * *"
   workflow_dispatch:
+
+permissions:
+  actions: write
 
 jobs:
   ping:
@@ -21,7 +24,7 @@ jobs:
           KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
         run: |
           if [ -z "$URL" ] || [ -z "$KEY" ]; then
-            echo "Секреты не заданы, пропускаю."
+            echo "Secrets are not set, skipping."
             exit 0
           fi
           code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/rest/v1/rpc/ping" \
@@ -29,3 +32,11 @@ jobs:
             -H "Content-Type: application/json" -d '{}')
           echo "HTTP $code"
           [ "$code" = "200" ]
+
+      # GitHub switches scheduled workflows off after 60 days without commits.
+      # Re-enabling this workflow through the API on every run keeps the schedule going.
+      - name: Keep the schedule enabled
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/ping.yml/enable" || true

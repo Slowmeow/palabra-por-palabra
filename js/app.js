@@ -1,52 +1,67 @@
-import { reflowText, buildStructure, contextAround, plural, esc } from "./text.js";
 import {
-  MODELS, EFFORTS, FACT_TYPES, modelInfo, generateCard, explainContext, lookupWords, checkKey, estimateCardCost,
+  reflowText, buildStructure, contextAround, tokenize, esc, searchKey, isChapterHeading, wordKey,
+} from "./text.js";
+import {
+  MODELS, FACT_TYPES, factKey, modelInfo, generateCard, explainContext, lookupWords, checkKey, estimateCardCost,
 } from "./claude.js";
 import { I } from "./icons.js";
+import { t, th, setUiLang, uiLang, UI_LANGS } from "./i18n.js";
+import { STUDY_LANGS, EXPLAIN_LANGS, langInfo, langName, langCode, dictLinks, isLangTag, canonLang } from "./langs.js";
+import { schedule, ivlLabel } from "./srs.js";
 
-/* ---------------- Константы и состояние ---------------- */
+/* ---------------- Constants and state ---------------- */
 
 const CFG = window.PPP_CONFIG || {};
-const LS = { url: "ppp_supabase_url", key: "ppp_supabase_key", api: "ppp_anthropic_key", theme: "ppp_theme" };
+const LS = {
+  url: "ppp_supabase_url",
+  key: "ppp_supabase_key",
+  api: "ppp_anthropic_key",
+  theme: "ppp_theme",
+  ui: "ppp_ui_lang",
+};
+const SETTINGS_VERSION = 2;
 const DEFAULTS = {
+  v: SETTINGS_VERSION,
   size: 21,
   theme: "light",
+  uiLang: "en",
+  explainLang: "en",
+  studyLang: "es",
   highlight: "unlearned",
-  cardModel: "claude-opus-5",
+  cardModel: "claude-opus-5-5",
   cardEffort: "high",
   showThinking: true,
   haikuThinking: false,
   autoCard: false,
-  dictModel: "claude-haiku-4-5-20251001",
+  dictModel: "claude-haiku-5-5",
   autoDict: true,
+  reviewNew: 20,
   lastChapter: null,
   spent: 0,
 };
-const LEVEL_LABEL = { 5: "не знаю", 4: "смутно", 3: "узнаю", 2: "почти", 1: "знаю" };
-const HL_LABEL = { all: "все слова", unlearned: "неизученные", none: "выключена" };
+// Translations and cards made before explanation languages existed were written in Russian.
+const LEGACY_XL = "ru";
 const HL_ORDER = ["all", "unlearned", "none"];
 const MOBILE_MAX = 759;
 const DICT_BATCH = 60;
-const FACT_META = {
-  смешной: ["😄", "Смешной факт", "fun"],
-  грустный: ["🥀", "Грустный факт", "sad"],
-  жуткий: ["👻", "Жуткий факт", "creepy"],
-  удивительный: ["✨", "Удивительный факт", "wow"],
-  исторический: ["📜", "Исторический факт", "hist"],
-};
+const REVIEW_MAX_DUE = 200;
+const REVIEW_NEW_OPTIONS = [5, 10, 15, 20, 30, 50, 100];
+const FACT_EMOJI = { funny: "😄", sad: "🥀", creepy: "👻", surprising: "✨", historical: "📜" };
 
 const S = {
   db: null,
   email: "",
   bound: false,
   settings: { ...DEFAULTS },
+  lang: "es", // active study language
+  panelLang: null, // language shown in the vocabulary and progress panels
   chapters: [],
   chapter: null,
   st: null,
   chapterWords: new Map(),
-  words: new Map(),
-  full: new Map(),
-  sel: null,
+  vocab: new Map(), // lang -> Map(word -> light row)
+  full: new Map(), // wkey -> full row
+  sel: null, // { w, lang, sid, ti, surface }
   panel: { open: false, mode: "word" },
   editing: false,
   regenOpen: false,
@@ -58,21 +73,39 @@ const S = {
   quickErr: new Map(),
   dict: { running: false, done: 0, total: 0, token: null },
   bulk: { running: false, done: 0, total: 0, token: null },
-  vocab: { q: "", level: 0 },
+  vfilter: { q: "", level: 0 },
   renderedWord: null,
+  review: null,
+  voiceWarned: new Set(),
 };
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&"));
 const apiKey = () => localStorage.getItem(LS.api) || "";
-const rowOf = (w) => S.words.get(w) || { word: w, level: 5, quick: null, has_card: false, first_chapter: null, learned_at: null };
 const money = (n) => (n > 0 && n < 0.01 ? `$${n.toFixed(4)}` : `$${(n || 0).toFixed(2)}`);
-const fmtInt = (n) => Number(n || 0).toLocaleString("ru-RU");
-const isSelected = (w) => !!S.sel && S.sel.w === w && S.panel.open && S.panel.mode === "word";
+const fmtInt = (n) => Number(n || 0).toLocaleString(uiLang());
 const chapterTitle = (id) => S.chapters.find((c) => c.id === id)?.title || "";
 const skel = (n) =>
   Array.from({ length: n }, (_, i) => `<div class="pp-sk" style="width:${[92, 78, 86, 64, 82, 70][i % 6]}%"></div>`).join("");
+
+const wkey = (lang, w) => `${lang}\t${w}`;
+function wordsOf(lang = S.lang) {
+  let m = S.vocab.get(lang);
+  if (!m) S.vocab.set(lang, (m = new Map()));
+  return m;
+}
+const blankRow = (w, lang) => ({ word: w, lang, level: 5, quick: null, has_card: false, first_chapter: null, learned_at: null, srs: null });
+const rowOf = (w, lang = S.lang) => wordsOf(lang).get(w) || blankRow(w, lang);
+const setRow = (row) => wordsOf(row.lang).set(row.word, row);
+const selLang = () => S.sel?.lang || S.lang;
+const isSelected = (w, lang) => !!S.sel && S.sel.w === w && S.sel.lang === lang && S.panel.open && S.panel.mode === "word";
+const xl = () => S.settings.explainLang;
+const quickXl = (q) => q?.xl || LEGACY_XL;
+const cardXl = (card) => card?.meta?.xl || LEGACY_XL;
+// A quick translation is missing, or written in another explanation language (and not typed by hand).
+const needsQuick = (row) => !row.quick || (!row.quick.manual && quickXl(row.quick) !== xl());
+const readerLangAttrs = (lang) => `lang="${esc(lang)}"${langInfo(lang).rtl ? ' dir="rtl"' : ""}`;
 
 let toastTimer;
 function toast(msg, ms = 4200) {
@@ -84,16 +117,22 @@ function toast(msg, ms = 4200) {
   toastTimer = setTimeout(() => (el.hidden = true), ms);
 }
 
-function applyTheme(t) {
-  document.documentElement.dataset.theme = t === "dark" ? "dark" : "light";
-  localStorage.setItem(LS.theme, t === "dark" ? "dark" : "light");
+function applyTheme(theme) {
+  const v = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = v;
+  localStorage.setItem(LS.theme, v);
+}
+
+function applyUiLang(code) {
+  setUiLang(code);
+  localStorage.setItem(LS.ui, uiLang());
 }
 
 let settingsTimer;
 function saveSettingsSoon() {
   clearTimeout(settingsTimer);
   settingsTimer = setTimeout(() => {
-    S.db?.saveSettings(S.settings).catch((e) => toast(`Настройки не сохранились: ${e.message}`));
+    S.db?.saveSettings(S.settings).catch((e) => toast(t("toast.settingsNotSaved", { msg: e.message })));
   }, 800);
 }
 
@@ -103,50 +142,84 @@ function addSpent(cost) {
   saveSettingsSoon();
 }
 
-function speak(text) {
-  if (!("speechSynthesis" in window)) return toast("Этот браузер не умеет озвучивать текст");
+/* ---------------- Speech ---------------- */
+
+let voices = [];
+function loadVoices() {
+  try {
+    voices = window.speechSynthesis?.getVoices() || [];
+  } catch {
+    voices = [];
+  }
+}
+if ("speechSynthesis" in window) {
+  loadVoices();
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+}
+
+function speak(text, lang) {
+  if (!("speechSynthesis" in window)) return toast(t("toast.noSpeech"));
   try {
     const synth = window.speechSynthesis;
     synth.cancel();
+    if (!voices.length) loadVoices();
+    const tag = langInfo(lang).tts;
+    const base = tag.split("-")[0].toLowerCase();
+    const norm = (v) => (v.lang || "").replace("_", "-").toLowerCase();
+    const voice = voices.find((v) => norm(v) === tag.toLowerCase()) || voices.find((v) => norm(v).startsWith(base));
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = "es-ES";
+    u.lang = tag;
     u.rate = 0.9;
-    const voice = synth.getVoices().find((v) => (v.lang || "").toLowerCase().startsWith("es"));
     if (voice) u.voice = voice;
+    else if (voices.length && !S.voiceWarned.has(base)) {
+      S.voiceWarned.add(base);
+      toast(t("toast.noVoice", { lang: langName(lang) }), 6000);
+    }
     synth.speak(u);
   } catch {
-    /* озвучка недоступна */
+    /* speech is unavailable */
   }
 }
 
-/* ---------------- Запуск, подключение, вход ---------------- */
+/* ---------------- Boot, connection, sign-in ---------------- */
 
 export async function boot() {
+  applyUiLang(localStorage.getItem(LS.ui) || DEFAULTS.uiLang);
   applyTheme(localStorage.getItem(LS.theme) || "light");
   bindOnce();
   const url = (CFG.SUPABASE_URL || localStorage.getItem(LS.url) || "").trim();
   const key = (CFG.SUPABASE_PUBLISHABLE_KEY || localStorage.getItem(LS.key) || "").trim();
   if (!url || !key) return renderSetup();
-  let makeDb;
-  try {
-    ({ makeDb } = await import("./db.js"));
-  } catch {
-    return renderMessage("Библиотека базы данных не загрузилась", "Проверьте интернет и обновите страницу.");
-  }
-  try {
-    S.db = makeDb(url, key);
-  } catch (e) {
-    return renderSetup(`Подключиться не получилось: ${e.message}`);
+  if (!S.db) {
+    let makeDb;
+    try {
+      ({ makeDb } = await import("./db.js"));
+    } catch {
+      return renderMessage(t("boot.libFailed"), t("boot.libFailedText"));
+    }
+    try {
+      S.db = makeDb(url, key);
+    } catch (e) {
+      return renderSetup(t("setup.connectFailed", { msg: e.message }));
+    }
   }
   const session = await S.db.session().catch(() => null);
   if (!session) return renderLogin();
   return startApp();
 }
 
+function uiLangSwitchHTML() {
+  return `<div class="pp-ui-switch" role="group" aria-label="${esc(t("set.uiLang"))}">${UI_LANGS.map(
+    ([code, label]) =>
+      `<button class="pp-link${code === uiLang() ? " on" : ""}" data-act="ui-lang" data-val="${code}" lang="${code}">${esc(label)}</button>`
+  ).join("")}</div>`;
+}
+
 function authShell(inner) {
   return `<main class="pp-auth"><div class="pp-auth-card">
     <div class="pp-brand"><span class="pp-logo" aria-hidden="true">ñ</span><span class="pp-brand-t">Palabra por palabra</span></div>
     ${inner}
+    ${uiLangSwitchHTML()}
   </div></main>`;
 }
 
@@ -156,23 +229,23 @@ function renderMessage(title, text) {
 
 function renderSetup(err = "") {
   $("#app").innerHTML = authShell(`
-    <h1 class="pp-auth-h">Подключите базу данных</h1>
-    <p class="pp-lead">Вставьте Project URL и publishable key из Supabase. Чтобы не вводить их на каждом устройстве, пропишите их в файле config.js.</p>
+    <h1 class="pp-auth-h">${esc(t("setup.title"))}</h1>
+    <p class="pp-lead">${esc(t("setup.lead"))}</p>
     ${err ? `<p class="pp-error-line">${esc(err)}</p>` : ""}
     <form id="setup-form" class="pp-form-plain">
       <label class="pp-label" for="su-url">Project URL</label>
       <input class="pp-input" id="su-url" required placeholder="https://xxxx.supabase.co" autocomplete="off" spellcheck="false">
       <label class="pp-label" for="su-key">Publishable key</label>
       <input class="pp-input" id="su-key" required placeholder="sb_publishable_…" autocomplete="off" spellcheck="false">
-      <button class="pp-primary" type="submit">Подключить</button>
+      <button class="pp-primary" type="submit">${esc(t("setup.connect"))}</button>
     </form>`);
   $("#setup-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const url = $("#su-url").value.trim().replace(/\/+$/, "");
     const key = $("#su-key").value.trim();
-    if (/^sb_secret_/.test(key)) return renderSetup("Это секретный ключ. Его нельзя вставлять на сайт: нужен publishable key.");
-    if (/^sk-ant-/.test(key)) return renderSetup("Это ключ Anthropic. Здесь нужен ключ Supabase, а ключ Anthropic вводится в настройках после входа.");
-    if (!/^https:\/\/.+/.test(url)) return renderSetup("Project URL должен начинаться с https://");
+    if (/^sb_secret_/.test(key)) return renderSetup(t("setup.secretKey"));
+    if (/^sk-ant-/.test(key)) return renderSetup(t("setup.anthropicKey"));
+    if (!/^https:\/\/.+/.test(url)) return renderSetup(t("setup.badUrl"));
     localStorage.setItem(LS.url, url);
     localStorage.setItem(LS.key, key);
     boot();
@@ -182,28 +255,28 @@ function renderSetup(err = "") {
 function renderLogin(err = "") {
   const fromConfig = !!(CFG.SUPABASE_URL && CFG.SUPABASE_PUBLISHABLE_KEY);
   $("#app").innerHTML = authShell(`
-    <h1 class="pp-auth-h">Вход</h1>
-    <p class="pp-lead">Войдите с почтой и паролем, которые вы создали в Supabase.</p>
+    <h1 class="pp-auth-h">${esc(t("login.title"))}</h1>
+    <p class="pp-lead">${esc(t("login.lead"))}</p>
     ${err ? `<p class="pp-error-line">${esc(err)}</p>` : ""}
     <form id="login-form" class="pp-form-plain">
-      <label class="pp-label" for="li-email">Почта</label>
+      <label class="pp-label" for="li-email">${esc(t("login.email"))}</label>
       <input class="pp-input" id="li-email" type="email" required autocomplete="username">
-      <label class="pp-label" for="li-pass">Пароль</label>
+      <label class="pp-label" for="li-pass">${esc(t("login.password"))}</label>
       <input class="pp-input" id="li-pass" type="password" required autocomplete="current-password">
-      <button class="pp-primary" type="submit" id="li-btn">Войти</button>
+      <button class="pp-primary" type="submit" id="li-btn">${esc(t("login.submit"))}</button>
     </form>
-    ${fromConfig ? "" : `<button class="pp-link pp-auth-alt" data-act="reset-conn">Подключить другую базу данных</button>`}`);
+    ${fromConfig ? "" : `<button class="pp-link pp-auth-alt" data-act="reset-conn">${esc(t("login.otherDb"))}</button>`}`);
   $("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = $("#li-btn");
     btn.disabled = true;
-    btn.textContent = "Вхожу…";
+    btn.textContent = t("login.busy");
     try {
       await S.db.signIn($("#li-email").value.trim(), $("#li-pass").value);
       await startApp();
     } catch (er) {
       const m = String(er?.message || er);
-      renderLogin(/invalid login/i.test(m) ? "Неверная почта или пароль." : `Войти не получилось: ${m}`);
+      renderLogin(/invalid login/i.test(m) ? t("login.invalid") : t("login.failed", { msg: m }));
     }
   });
 }
@@ -213,24 +286,26 @@ function shellHTML() {
   <div class="pp-shell" id="shell">
     <header class="pp-top">
       <div class="pp-brand"><span class="pp-logo" aria-hidden="true">ñ</span><span class="pp-brand-t">Palabra por palabra</span></div>
+      <span class="pp-lang-badge" id="lang-badge"></span>
       <div class="pp-select-wrap" id="chapter-picker" hidden>
-        <select class="pp-select" id="chapter-select" aria-label="Глава"></select>
+        <select class="pp-select" id="chapter-select" aria-label="${esc(t("top.chapter"))}"></select>
         <span class="pp-select-ico">${I.down}</span>
       </div>
       <div class="pp-actions">
         <span class="pp-pill" id="top-progress" hidden></span>
-        <button class="pp-hl-btn" data-act="cycle-highlight" id="hl-btn" title="Сменить подсветку слов">${I.highlight}<span id="hl-label"></span></button>
-        <button class="pp-icon-btn" data-act="add-chapter" title="Добавить главу" aria-label="Добавить главу">${I.plus}</button>
-        <button class="pp-icon-btn" data-act="panel" data-mode="vocab" title="Мой словарь" aria-label="Мой словарь">${I.book}<span class="pp-count" id="vocab-count" hidden></span></button>
-        <button class="pp-icon-btn" data-act="panel" data-mode="progress" title="Прогресс" aria-label="Прогресс">${I.chart}</button>
-        <button class="pp-icon-btn" data-act="panel" data-mode="settings" title="Настройки" aria-label="Настройки">${I.gear}</button>
+        <button class="pp-hl-btn" data-act="cycle-highlight" id="hl-btn" title="${esc(t("top.highlight"))}">${I.highlight}<span id="hl-label"></span></button>
+        <button class="pp-icon-btn" data-act="add-chapter" title="${esc(t("top.add"))}" aria-label="${esc(t("top.add"))}">${I.plus}</button>
+        <button class="pp-icon-btn" data-act="review" title="${esc(t("top.review"))}" aria-label="${esc(t("top.review"))}">${I.cards}<span class="pp-count" id="review-count" hidden></span></button>
+        <button class="pp-icon-btn" data-act="panel" data-mode="vocab" title="${esc(t("panel.vocab"))}" aria-label="${esc(t("panel.vocab"))}">${I.book}<span class="pp-count" id="vocab-count" hidden></span></button>
+        <button class="pp-icon-btn" data-act="panel" data-mode="progress" title="${esc(t("panel.progress"))}" aria-label="${esc(t("panel.progress"))}">${I.chart}</button>
+        <button class="pp-icon-btn" data-act="panel" data-mode="settings" title="${esc(t("panel.settings"))}" aria-label="${esc(t("panel.settings"))}">${I.gear}</button>
       </div>
     </header>
     <main id="main"></main>
   </div>
   <aside class="pp-drawer" id="drawer" aria-hidden="true">
     <div class="pp-grab"></div>
-    <div class="pp-drawer-h"><span id="drawer-title"></span><button class="pp-icon-btn sm" data-act="close-panel" aria-label="Закрыть панель">${I.x}</button></div>
+    <div class="pp-drawer-h"><span id="drawer-title"></span><button class="pp-icon-btn sm" data-act="close-panel" aria-label="${esc(t("panel.close"))}">${I.x}</button></div>
     <div class="pp-drawer-b" id="drawer-body"></div>
   </aside>
   <div id="modal-root"></div>
@@ -242,38 +317,82 @@ function setMain(html) {
   if (m) m.innerHTML = html;
 }
 
+function loadingHTML(key) {
+  return `<div class="pp-boot"><span class="pp-spin">${I.loader}</span><span>${esc(t(key))}</span></div>`;
+}
+
+function migrateSettings(saved) {
+  const s = { ...DEFAULTS, ...(saved || {}) };
+  if (!saved || (saved.v || 1) < SETTINGS_VERSION) {
+    // Version 1 used older models and had no language settings.
+    const newer = {
+      "claude-opus-5": "claude-opus-5-5",
+      "claude-sonnet-5": "claude-sonnet-5-5",
+      "claude-haiku-4-5": "claude-haiku-5-5",
+      "claude-haiku-4-5-20251001": "claude-haiku-5-5",
+    };
+    s.cardModel = newer[s.cardModel] || s.cardModel;
+    s.dictModel = newer[s.dictModel] || s.dictModel;
+    if (!saved?.uiLang) s.uiLang = uiLang();
+    s.v = SETTINGS_VERSION;
+  }
+  return s;
+}
+
 async function startApp() {
   $("#app").innerHTML = shellHTML();
-  setMain(`<div class="pp-boot"><span class="pp-spin">${I.loader}</span><span>Загружаю главы и слова…</span></div>`);
+  setMain(loadingHTML("boot.loading"));
   try {
-    const [chapters, words, settings, email] = await Promise.all([
+    const [chapters, words, saved, email] = await Promise.all([
       S.db.listChapters(),
       S.db.loadWords(),
       S.db.loadSettings(),
       S.db.userEmail().catch(() => ""),
     ]);
-    S.chapters = chapters;
-    S.words = new Map(words.map((r) => [r.word, r]));
-    S.settings = { ...DEFAULTS, ...(settings || {}) };
+    S.chapters = chapters.map((c) => ({ ...c, lang: c.lang || "es" }));
+    S.vocab = new Map();
+    for (const r of words) setRow({ ...r, lang: r.lang || "es" });
+    S.settings = migrateSettings(saved);
+    if (!saved || (saved.v || 1) < SETTINGS_VERSION) saveSettingsSoon();
     S.email = email;
-    applyTheme(S.settings.theme);
+    if (S.settings.uiLang !== uiLang()) {
+      applyUiLang(S.settings.uiLang);
+      $("#app").innerHTML = shellHTML();
+    }
+    const target = S.chapters.find((c) => c.id === S.settings.lastChapter) || S.chapters.at(-1);
+    S.lang = target?.lang || S.settings.studyLang || "es";
     applyReaderSettings();
     updateChapterSelect();
     updateVocabCount();
-    const target = chapters.find((c) => c.id === S.settings.lastChapter)?.id || chapters.at(-1)?.id;
-    if (target) await openChapter(target);
+    updateReviewCount();
+    if (target) await openChapter(target.id);
     else renderEmpty();
   } catch (e) {
+    const outdated = /\b(lang|srs)\b/.test(e.message) && /column|schema cache|does not exist/i.test(e.message);
     setMain(`<div class="pp-empty"><div class="pp-empty-in">
-      <h1 class="pp-hero">Данные не загрузились</h1>
+      <h1 class="pp-hero">${esc(t(outdated ? "err.dbOutdatedTitle" : "err.loadTitle"))}</h1>
       <p class="pp-lead">${esc(e.message)}</p>
-      <p class="pp-lead">Если сайтом давно не пользовались, бесплатный проект Supabase мог уснуть. Откройте панель Supabase, восстановите проект и обновите страницу.</p>
-      <button class="pp-primary" data-act="reload">Обновить страницу</button>
+      <p class="pp-lead">${esc(t(outdated ? "err.dbOutdated" : "err.loadAsleep"))}</p>
+      <button class="pp-primary" data-act="reload">${esc(t("err.reload"))}</button>
     </div></div>`);
   }
 }
 
-/* ---------------- События ---------------- */
+// After switching the interface language: redraw everything in place.
+function rerenderAll() {
+  const panel = { ...S.panel };
+  $("#app").innerHTML = shellHTML();
+  applyReaderSettings();
+  updateChapterSelect();
+  updateVocabCount();
+  updateReviewCount();
+  updateTopProgress();
+  if (S.chapter && S.st) renderChapter();
+  else renderEmpty();
+  if (panel.open) openPanel(panel.mode);
+}
+
+/* ---------------- Events ---------------- */
 
 function bindOnce() {
   if (S.bound) return;
@@ -283,7 +402,7 @@ function bindOnce() {
   app.addEventListener("change", onChange);
   app.addEventListener("input", onInput);
   document.addEventListener("keydown", onKey);
-  setInterval(tickGen, 1000);
+  setInterval(tick, 1000);
 }
 
 const ACTIONS = {
@@ -292,6 +411,14 @@ const ACTIONS = {
     localStorage.removeItem(LS.url);
     localStorage.removeItem(LS.key);
     location.reload();
+  },
+  "ui-lang": (a) => {
+    applyUiLang(a.dataset.val);
+    if (S.chapters.length || $("#shell")) {
+      S.settings.uiLang = uiLang();
+      saveSettingsSoon();
+      rerenderAll();
+    } else boot();
   },
   panel: (a) => togglePanel(a.dataset.mode),
   "close-panel": () => closePanel(),
@@ -306,14 +433,14 @@ const ACTIONS = {
     S.settings.highlight = HL_ORDER[(i + 1) % HL_ORDER.length];
     applyReaderSettings();
     saveSettingsSoon();
-    toast(`Подсветка: ${HL_LABEL[S.settings.highlight]}`, 1800);
+    toast(t("hl.label", { mode: t(`hl.${S.settings.highlight}`) }), 1800);
     if (S.panel.open && S.panel.mode === "settings") renderSettings();
   },
-  level: (a) => S.sel && setLevel(S.sel.w, Number(a.dataset.level)),
-  speak: (a) => speak(a.dataset.text),
+  level: (a) => S.sel && setLevel(S.sel.w, Number(a.dataset.level), S.sel.lang),
+  speak: (a) => speak(a.dataset.text, a.dataset.lang || selLang()),
   occ: (a) => jumpOcc(Number(a.dataset.dir)),
   "gen-card": () => generateForSelected(),
-  "gen-cancel": () => S.sel && S.gen.get(S.sel.w)?.abort.abort(),
+  "gen-cancel": () => S.sel && S.gen.get(wkey(S.sel.lang, S.sel.w))?.abort.abort(),
   "regen-open": () => {
     S.regenOpen = true;
     renderWordView();
@@ -324,8 +451,9 @@ const ACTIONS = {
     renderWordView();
   },
   "regen-go": () => generateForSelected(($("#regen-wish")?.value || "").trim()),
+  "regen-xl": () => generateForSelected(),
   "explain-here": () => explainHere(),
-  "retry-quick": () => S.sel && ensureQuick(S.sel.w, true),
+  "retry-quick": () => S.sel && ensureQuick(S.sel.w, true, S.sel.lang),
   edit: () => {
     S.editing = true;
     renderWordView();
@@ -335,9 +463,9 @@ const ACTIONS = {
     renderWordView();
   },
   "edit-save": () => saveEdit(),
-  "open-word": (a) => openWordFromList(a.dataset.w),
+  "open-word": (a) => openWordFromList(a.dataset.w, a.dataset.lang),
   "vocab-level": (a) => {
-    S.vocab.level = Number(a.dataset.level);
+    S.vfilter.level = Number(a.dataset.level);
     renderVocab();
   },
   "prepare-dict": () => prepareDictionary(true),
@@ -353,7 +481,7 @@ const ACTIONS = {
   "save-key": () => saveKey(),
   "check-key": () => checkKeyAction(),
   "clear-key": () => {
-    if (!confirm("Удалить ключ Anthropic из этого браузера?")) return;
+    if (!confirm(t("key.confirmDelete"))) return;
     localStorage.removeItem(LS.api);
     renderSettings();
   },
@@ -362,7 +490,7 @@ const ACTIONS = {
   export: () => exportBackup(),
   import: () => $("#import-file")?.click(),
   "reset-spent": () => {
-    if (!confirm("Обнулить счётчик потраченных денег?")) return;
+    if (!confirm(t("prog.confirmReset"))) return;
     S.settings.spent = 0;
     saveSettingsSoon();
     renderPanel();
@@ -371,6 +499,19 @@ const ACTIONS = {
     await S.db.signOut();
     location.reload();
   },
+  review: () => openReview(),
+  "rv-scope": (a) => {
+    S.review.scope = a.dataset.val;
+    renderReview();
+  },
+  "rv-start": () => startReview(),
+  "rv-show": () => revealReview(),
+  "rv-rate": (a) => rateReview(Number(a.dataset.level)),
+  "rv-again": () => {
+    S.review = { stage: "start", scope: S.review.scope, lang: S.lang };
+    renderReview();
+  },
+  "rv-close": () => closeModal(),
 };
 
 function onClick(e) {
@@ -384,49 +525,100 @@ function onClick(e) {
   fn(a, e);
 }
 
+// Asks for a language code that is not in the menu. Returns the code or null.
+function askLangCode() {
+  const raw = prompt(t("lang.askCode"));
+  if (!raw || !raw.trim()) return null;
+  const code = raw.trim();
+  if (!isLangTag(code)) {
+    toast(t("lang.badCode", { code }));
+    return null;
+  }
+  return canonLang(code);
+}
+
 function onChange(e) {
-  const t = e.target;
-  if (t.id === "chapter-select") return void openChapter(t.value);
-  if (t.id === "add-join") return updateAddPreview();
-  if (t.id === "import-file") return void importBackup(t.files?.[0]);
-  const k = t.dataset.set;
+  const tg = e.target;
+  if (tg.id === "chapter-select") return void openChapter(tg.value);
+  if (tg.id === "add-join") return updateAddPreview();
+  if (tg.id === "add-lang") {
+    if (tg.value === "__other") {
+      const code = askLangCode();
+      const lang = code || S.lang;
+      tg.innerHTML = langOptions(STUDY_LANGS, lang, true);
+    }
+    $("#add-text")?.setAttribute("lang", tg.value);
+    return updateAddPreview();
+  }
+  if (tg.id === "panel-lang") {
+    S.panelLang = tg.value;
+    return renderPanel();
+  }
+  if (tg.id === "import-file") return void importBackup(tg.files?.[0]);
+  const k = tg.dataset.set;
   if (!k) return;
-  let val = t.type === "checkbox" ? t.checked : t.type === "range" ? Number(t.value) : t.value;
+  let val = tg.type === "checkbox" ? tg.checked : tg.type === "range" ? Number(tg.value) : tg.value;
   if ((k === "cardModel" || k === "dictModel") && val === "__custom") {
-    const id = prompt("Введите ID модели Claude, например claude-opus-5");
+    const id = prompt(t("set.customModelAsk"));
     if (!id || !id.trim()) return renderSettings();
     val = id.trim();
   }
+  if (k === "explainLang" && val === "__other") {
+    val = askLangCode();
+    if (!val) return renderSettings();
+  }
+  if (k === "reviewNew") val = Number(val);
   S.settings[k] = val;
   if (k === "cardModel") {
     const inf = modelInfo(val);
     if (inf.efforts && !inf.efforts.includes(S.settings.cardEffort)) S.settings.cardEffort = "high";
   }
-  applyReaderSettings();
   saveSettingsSoon();
-  if (["cardModel", "cardEffort", "dictModel", "showThinking", "haikuThinking"].includes(k)) renderSettings();
+  if (k === "uiLang") {
+    applyUiLang(val);
+    return rerenderAll();
+  }
+  applyReaderSettings();
+  if (k === "explainLang") {
+    updateChapterStats();
+    if (S.sel) patchQuick(S.sel.w, S.sel.lang);
+    if (S.settings.autoDict && apiKey()) prepareDictionary();
+  }
+  if (["cardModel", "cardEffort", "dictModel", "showThinking", "haikuThinking", "explainLang"].includes(k)) renderSettings();
 }
 
 let previewTimer;
 function onInput(e) {
-  const t = e.target;
-  if (t.dataset.role === "vocab-search") {
-    S.vocab.q = t.value;
+  const tg = e.target;
+  if (tg.dataset.role === "vocab-search") {
+    S.vfilter.q = tg.value;
     renderVocabList();
-  } else if (t.id === "add-text") {
+  } else if (tg.id === "add-text") {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(updateAddPreview, 150);
-  } else if (t.dataset.set === "size") {
-    S.settings.size = Number(t.value);
+  } else if (tg.dataset.set === "size") {
+    S.settings.size = Number(tg.value);
     applyReaderSettings();
     const out = $("#size-out");
-    if (out) out.textContent = `${t.value} px`;
+    if (out) out.textContent = `${tg.value} px`;
   }
 }
 
 function onKey(e) {
   if (!S.db) return;
   const typing = e.target.closest?.("input, textarea, select, [contenteditable]");
+  if (S.review && $("#modal-root .pp-rv")) {
+    if (e.key === "Escape") return closeModal();
+    if (typing || e.metaKey || e.ctrlKey || e.altKey || S.review.stage !== "card") return;
+    if (!S.review.revealed && (e.key === " " || e.key === "Enter")) {
+      e.preventDefault();
+      revealReview();
+    } else if (S.review.revealed && /^[1-5]$/.test(e.key)) {
+      e.preventDefault();
+      rateReview(Number(e.key));
+    }
+    return;
+  }
   if (e.key === "Escape") {
     if ($("#modal-root .pp-modal")) closeModal();
     else if (S.panel.open && !typing) closePanel();
@@ -436,39 +628,60 @@ function onKey(e) {
   if (!S.panel.open || S.panel.mode !== "word" || !S.sel || S.editing) return;
   if (/^[1-5]$/.test(e.key)) {
     e.preventDefault();
-    setLevel(S.sel.w, Number(e.key));
+    setLevel(S.sel.w, Number(e.key), S.sel.lang);
   } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && S.sel.sid != null) {
     e.preventDefault();
     moveSelection(e.key === "ArrowRight" ? 1 : -1);
   }
 }
 
-function tickGen() {
+let ticks = 0;
+function tick() {
+  if (++ticks % 60 === 0) updateReviewCount();
   if (!S.sel) return;
-  const job = S.gen.get(S.sel.w);
+  const job = S.gen.get(wkey(S.sel.lang, S.sel.w));
   const el = $("#gen-elapsed");
-  if (job && el) el.textContent = `${Math.round((Date.now() - job.started) / 1000)} с`;
+  if (job && el) el.textContent = t("gen.seconds", { n: Math.round((Date.now() - job.started) / 1000) });
 }
 
-/* ---------------- Главы и чтение ---------------- */
+/* ---------------- Chapters and reading ---------------- */
+
+function chapterLangs() {
+  return [...new Set(S.chapters.map((c) => c.lang))];
+}
 
 function updateChapterSelect() {
   const sel = $("#chapter-select");
   if (!sel) return;
   $("#chapter-picker").hidden = !S.chapters.length;
-  sel.innerHTML = S.chapters
-    .map((c) => `<option value="${esc(c.id)}"${S.chapter?.id === c.id ? " selected" : ""}>${esc(c.title)}</option>`)
-    .join("");
+  const langs = chapterLangs();
+  const opt = (c) => `<option value="${esc(c.id)}"${S.chapter?.id === c.id ? " selected" : ""}>${esc(c.title)}</option>`;
+  sel.innerHTML =
+    langs.length > 1
+      ? langs
+          .map((l) => `<optgroup label="${esc(langName(l))}">${S.chapters.filter((c) => c.lang === l).map(opt).join("")}</optgroup>`)
+          .join("")
+      : S.chapters.map(opt).join("");
+  const badge = $("#lang-badge");
+  if (badge) {
+    badge.textContent = langCode(S.lang);
+    badge.title = langName(S.lang);
+  }
 }
 
 function updateVocabCount() {
   const el = $("#vocab-count");
   if (!el) return;
   let n = 0;
-  for (const r of S.words.values()) if (r.level === 1) n++;
+  for (const r of wordsOf(S.lang).values()) if (r.level === 1) n++;
   el.hidden = n === 0;
   el.textContent = n > 999 ? `${Math.floor(n / 1000)}k` : String(n);
-  el.title = `Выучено слов: ${n}`;
+  el.title = t("vocab.learnedTitle", { n });
+}
+
+function readerClass() {
+  const cjk = S.chapter && langInfo(S.chapter.lang).noSpace ? " is-cjk" : "";
+  return `pp-reader hl-${S.settings.highlight}${cjk}`;
 }
 
 function applyReaderSettings() {
@@ -476,33 +689,43 @@ function applyReaderSettings() {
   const r = $("#reader");
   if (r) {
     r.style.fontSize = `${S.settings.size}px`;
-    r.className = `pp-reader hl-${S.settings.highlight}`;
+    r.className = readerClass();
   }
-  $$(".pp-drawer .pp-sent[data-hl]").forEach((p) => (p.className = `pp-sent hl-${S.settings.highlight}`));
+  $$(".pp-sent[data-hl]").forEach((p) => (p.className = `pp-sent hl-${S.settings.highlight}`));
   const label = $("#hl-label");
-  if (label) label.textContent = `Подсветка: ${HL_LABEL[S.settings.highlight]}`;
+  if (label) label.textContent = t("hl.label", { mode: t(`hl.${S.settings.highlight}`) });
 }
 
 async function openChapter(id) {
-  if (S.editing && !confirm("Выйти из редактирования без сохранения?")) return updateChapterSelect();
+  if (S.editing && !confirm(t("confirm.leaveEdit"))) return updateChapterSelect();
   stopDictionary(true);
-  setMain(`<div class="pp-boot"><span class="pp-spin">${I.loader}</span><span>Открываю главу…</span></div>`);
+  setMain(loadingHTML("reader.opening"));
   try {
     const ch = await S.db.getChapter(id);
+    ch.lang = ch.lang || "es";
+    const langChanged = S.lang !== ch.lang;
     S.chapter = ch;
-    S.st = buildStructure(ch.paragraphs);
+    S.lang = ch.lang;
+    S.st = buildStructure(ch.paragraphs, ch.lang);
     S.chapterWords.set(id, new Set(S.st.firstOcc.keys()));
     S.editing = false;
     if (S.panel.open && S.panel.mode === "word") closePanel(true);
     S.sel = null;
     S.settings.lastChapter = id;
+    S.settings.studyLang = ch.lang;
     saveSettingsSoon();
     renderChapter();
     updateChapterSelect();
+    updateVocabCount();
+    updateReviewCount();
+    if (langChanged) {
+      S.panelLang = null;
+      if (S.panel.open) renderPanel();
+    }
     window.scrollTo(0, 0);
     if (S.settings.autoDict && apiKey()) prepareDictionary();
   } catch (e) {
-    setMain(`<div class="pp-empty"><div class="pp-empty-in"><h1 class="pp-hero">Глава не открылась</h1><p class="pp-lead">${esc(e.message)}</p></div></div>`);
+    setMain(`<div class="pp-empty"><div class="pp-empty-in"><h1 class="pp-hero">${esc(t("reader.openFailed"))}</h1><p class="pp-lead">${esc(e.message)}</p></div></div>`);
   }
 }
 
@@ -510,9 +733,9 @@ function renderEmpty() {
   S.chapter = null;
   S.st = null;
   setMain(`<div class="pp-empty"><div class="pp-empty-in">
-    <h1 class="pp-hero">У каждого слова своя история</h1>
-    <p class="pp-lead">Вставьте главу на испанском. Все слова в ней загорятся: чем ярче слово, тем хуже вы его знаете. Нажмите на слово, чтобы увидеть перевод и произношение, поставить уровень от 5 до 1 и попросить Claude подробно его разобрать.</p>
-    ${apiKey() ? "" : `<p class="pp-note">Сначала добавьте API-ключ Anthropic в <button class="pp-link" data-act="panel" data-mode="settings">настройках</button>, иначе переводы не появятся.</p>`}
+    <h1 class="pp-hero">${esc(t("empty.title"))}</h1>
+    <p class="pp-lead">${esc(t("empty.lead"))}</p>
+    ${apiKey() ? "" : `<p class="pp-note">${th("empty.noKey", { settings: `<button class="pp-link" data-act="panel" data-mode="settings">${esc(t("empty.settingsLink"))}</button>` }, ["settings"])}</p>`}
     ${addFormHTML(true)}
   </div></div>`);
   updateChapterSelect();
@@ -520,15 +743,16 @@ function renderEmpty() {
 
 function renderChapter() {
   const st = S.st;
+  const lang = S.chapter.lang;
   const html = st.paras
     .map((p) => {
       let inner = "";
       for (const s of p.sents) {
         for (let ti = 0; ti < s.tokens.length; ti++) {
-          const t = s.tokens[ti];
-          inner += t.w
-            ? `<span class="pp-wd l${rowOf(t.w).level}" data-w="${esc(t.w)}" data-s="${s.sid}" data-i="${ti}">${esc(t.t)}</span>`
-            : esc(t.t);
+          const tk = s.tokens[ti];
+          inner += tk.w
+            ? `<span class="pp-wd l${rowOf(tk.w, lang).level}" data-w="${esc(tk.w)}" data-s="${s.sid}" data-i="${ti}">${esc(tk.t)}</span>`
+            : esc(tk.t);
         }
       }
       return p.heading ? `<h1 class="pp-heading">${inner}</h1>` : `<p class="pp-p">${inner}</p>`;
@@ -539,39 +763,40 @@ function renderChapter() {
       <div class="pp-meta-row"><p class="pp-stats" id="chap-stats"></p><div class="pp-row" id="chap-actions"></div></div>
       <div class="pp-levelbar" id="chap-levelbar" aria-hidden="true"></div>
     </div>
-    <article class="pp-reader hl-${esc(S.settings.highlight)}" id="reader" lang="es" style="font-size:${Number(S.settings.size)}px">${html}</article>
-    <div class="pp-end"><span>Конец главы.</span><button class="pp-link" data-act="add-chapter">Добавить следующую главу</button></div>`);
+    <article class="${readerClass()}" id="reader" ${readerLangAttrs(lang)} style="font-size:${Number(S.settings.size)}px">${html}</article>
+    <div class="pp-end"><span>${esc(t("reader.end"))}</span><button class="pp-link" data-act="add-chapter">${esc(t("reader.addNext"))}</button></div>`);
   updateChapterStats();
 }
 
-function levelCounts(words) {
+function levelCounts(words, lang = S.lang) {
   const c = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-  for (const w of words) c[rowOf(w).level]++;
+  for (const w of words) c[rowOf(w, lang).level]++;
   return c;
 }
 
 function levelBarHTML(c) {
   return [1, 2, 3, 4, 5]
-    .map((l) => (c[l] ? `<i class="lb${l}" style="flex-grow:${c[l]}" title="Уровень ${l}: ${c[l]}"></i>` : ""))
+    .map((l) => (c[l] ? `<i class="lb${l}" style="flex-grow:${c[l]}" title="${esc(t("level.barTitle", { l, n: c[l] }))}"></i>` : ""))
     .join("");
 }
 
 function updateChapterStats() {
   if (!S.st || !$("#chap-stats")) return;
+  const lang = S.chapter.lang;
   const words = [...S.st.firstOcc.keys()];
-  const c = levelCounts(words);
+  const c = levelCounts(words, lang);
   const total = words.length;
-  $("#chap-stats").innerHTML = `Выучено <b>${c[1]}</b> из <b>${total}</b> ${plural(total, "слова", "слов", "слов")} главы, изучаются <b>${c[2] + c[3] + c[4]}</b>`;
+  $("#chap-stats").innerHTML = th("reader.stats", { learned: c[1], n: total, studying: c[2] + c[3] + c[4] });
   $("#chap-levelbar").innerHTML = levelBarHTML(c);
-  const noQuick = words.filter((w) => !rowOf(w).quick).length;
-  const unanalyzed = words.filter((w) => rowOf(w).level > 1 && !rowOf(w).has_card).length;
+  const noQuick = words.filter((w) => needsQuick(rowOf(w, lang))).length;
+  const unanalyzed = words.filter((w) => rowOf(w, lang).level > 1 && !rowOf(w, lang).has_card).length;
   let actions = "";
-  if (S.dict.running) actions += `<button class="pp-soft-btn" data-act="stop-dict">Остановить словарь</button>`;
+  if (S.dict.running) actions += `<button class="pp-soft-btn" data-act="stop-dict">${esc(t("reader.stopDict"))}</button>`;
   else if (noQuick && apiKey())
-    actions += `<button class="pp-soft-btn" data-act="prepare-dict" title="Быстрые переводы и произношение для всех слов главы">${I.book} Подготовить словарь (${noQuick})</button>`;
-  if (S.bulk.running) actions += `<button class="pp-soft-btn" data-act="stop-bulk">Остановить разбор</button>`;
+    actions += `<button class="pp-soft-btn" data-act="prepare-dict" title="${esc(t("reader.prepareDictTitle"))}">${I.book} ${esc(t("reader.prepareDict", { n: noQuick }))}</button>`;
+  if (S.bulk.running) actions += `<button class="pp-soft-btn" data-act="stop-bulk">${esc(t("reader.stopBulk"))}</button>`;
   else if (unanalyzed && apiKey())
-    actions += `<button class="pp-soft-btn" data-act="bulk" title="Подробный разбор всех слов главы, кроме выученных">${I.sparkles} Разобрать неизученные (${unanalyzed})</button>`;
+    actions += `<button class="pp-soft-btn" data-act="bulk" title="${esc(t("reader.bulkTitle"))}">${I.sparkles} ${esc(t("reader.bulk", { n: unanalyzed }))}</button>`;
   $("#chap-actions").innerHTML = actions;
 }
 
@@ -579,14 +804,15 @@ function updateTopProgress() {
   const el = $("#top-progress");
   if (!el) return;
   const parts = [];
-  if (S.dict.running) parts.push(`словарь ${S.dict.done} из ${S.dict.total}`);
-  if (S.bulk.running) parts.push(`разбор ${S.bulk.done} из ${S.bulk.total}`);
+  if (S.dict.running) parts.push(t("top.dictProgress", { done: S.dict.done, total: S.dict.total }));
+  if (S.bulk.running) parts.push(t("top.bulkProgress", { done: S.bulk.done, total: S.bulk.total }));
   el.hidden = !parts.length;
-  el.innerHTML = parts.length ? `<span class="pp-spin">${I.loader}</span>${parts.join(", ")}` : "";
+  el.innerHTML = parts.length ? `<span class="pp-spin">${I.loader}</span>${esc(parts.join(", "))}` : "";
 }
 
-function refreshWordSpans(w) {
-  const lvl = rowOf(w).level;
+function refreshWordSpans(w, lang) {
+  if (S.chapter?.lang !== lang) return;
+  const lvl = rowOf(w, lang).level;
   $$(`.pp-wd[data-w="${cssEsc(w)}"]`).forEach((el) => {
     el.classList.remove("l1", "l2", "l3", "l4", "l5");
     el.classList.add(`l${lvl}`);
@@ -610,20 +836,35 @@ function scrollToToken(sid, ti) {
   if (r.top < 80 || r.bottom > bottom) el.scrollIntoView({ behavior: "smooth", block: mobile ? "start" : "center" });
 }
 
-/* ---------------- Добавление главы ---------------- */
+/* ---------------- Adding a chapter ---------------- */
+
+function langOptions(list, selected, withOther) {
+  const codes = !selected || list.includes(selected) ? list : [...list, selected];
+  return (
+    codes
+      .map((c) => ({ c, n: langName(c) }))
+      .sort((a, b) => a.n.localeCompare(b.n, uiLang()))
+      .map(({ c, n }) => `<option value="${esc(c)}"${c === selected ? " selected" : ""}>${esc(n)}</option>`)
+      .join("") + (withOther ? `<option value="__other">${esc(t("lang.other"))}</option>` : "")
+  );
+}
 
 function addFormHTML(first) {
   return `<div class="pp-form">
-    <label class="pp-label" for="add-title">Название главы, если хотите своё</label>
-    <input class="pp-input" id="add-title" placeholder="Например: Capítulo 2">
-    <label class="pp-label" for="add-text">Текст главы</label>
-    <textarea class="pp-textarea" id="add-text" lang="es" placeholder="Вставьте сюда текст на испанском"></textarea>
-    <label class="pp-check"><input type="checkbox" id="add-join" checked> Склеивать строки, разорванные при копировании из PDF</label>
+    <div class="pp-form-grid">
+      <div><label class="pp-label" for="add-lang">${esc(t("add.lang"))}</label>
+        <select class="pp-input" id="add-lang">${langOptions(STUDY_LANGS, S.lang, true)}</select></div>
+      <div><label class="pp-label" for="add-title">${esc(t("add.titleLabel"))}</label>
+        <input class="pp-input" id="add-title" placeholder="${esc(t("add.titlePlaceholder"))}"></div>
+    </div>
+    <label class="pp-label" for="add-text">${esc(t("add.text"))}</label>
+    <textarea class="pp-textarea" id="add-text" lang="${esc(S.lang)}" placeholder="${esc(t("add.textPlaceholder"))}"></textarea>
+    <label class="pp-check"><input type="checkbox" id="add-join" checked> ${esc(t("add.join"))}</label>
     <div class="pp-form-foot">
-      <p class="pp-note" id="add-preview">После вставки здесь появится, сколько в главе новых для вас слов.</p>
+      <p class="pp-note" id="add-preview">${esc(t("add.previewEmpty"))}</p>
       <div class="pp-row">
-        ${first ? "" : `<button class="pp-soft-btn" data-act="modal-close">Отмена</button>`}
-        <button class="pp-primary" data-act="add-submit" id="add-submit" disabled>Добавить главу</button>
+        ${first ? "" : `<button class="pp-soft-btn" data-act="modal-close">${esc(t("common.cancel"))}</button>`}
+        <button class="pp-primary" data-act="add-submit" id="add-submit" disabled>${esc(t("add.submit"))}</button>
       </div>
     </div>
   </div>`;
@@ -634,17 +875,26 @@ function openAddChapter() {
     $("#add-text").focus();
     return;
   }
+  S.review = null;
   $("#modal-root").innerHTML = `<div class="pp-modal" data-act="modal-backdrop">
-    <div class="pp-modal-card" role="dialog" aria-modal="true" aria-label="Новая глава">
-      <div class="pp-drawer-h"><span>Новая глава</span><button class="pp-icon-btn sm" data-act="modal-close" aria-label="Закрыть">${I.x}</button></div>
+    <div class="pp-modal-card" role="dialog" aria-modal="true" aria-label="${esc(t("add.modalTitle"))}">
+      <div class="pp-drawer-h"><span>${esc(t("add.modalTitle"))}</span><button class="pp-icon-btn sm" data-act="modal-close" aria-label="${esc(t("common.close"))}">${I.x}</button></div>
       ${addFormHTML(false)}
     </div></div>`;
   $("#add-text")?.focus();
 }
 
 function closeModal() {
+  const wasReview = !!S.review;
   $("#modal-root").innerHTML = "";
+  S.review = null;
+  if (wasReview) {
+    updateReviewCount();
+    updateChapterStats();
+  }
 }
+
+const addLang = () => $("#add-lang")?.value || S.lang;
 
 function updateAddPreview() {
   const text = $("#add-text")?.value || "";
@@ -653,48 +903,54 @@ function updateAddPreview() {
   if (!btn || !out) return;
   if (!text.trim()) {
     btn.disabled = true;
-    out.textContent = "После вставки здесь появится, сколько в главе новых для вас слов.";
+    out.textContent = t("add.previewEmpty");
     return;
   }
-  const paras = reflowText(text, $("#add-join")?.checked);
-  const st = buildStructure(paras);
+  const lang = addLang();
+  const paras = reflowText(text, $("#add-join")?.checked, lang);
+  const st = buildStructure(paras, lang);
+  const known = wordsOf(lang);
   let fresh = 0;
-  for (const w of st.firstOcc.keys()) if (!S.words.has(w)) fresh++;
+  for (const w of st.firstOcc.keys()) if (!known.has(w)) fresh++;
   btn.disabled = !paras.length;
-  out.innerHTML = `Абзацев: <b>${paras.length}</b>, слов: <b>${fmtInt(st.tokenCount)}</b>, уникальных: <b>${fmtInt(st.firstOcc.size)}</b>, новых для вас: <b class="pp-accent">${fmtInt(fresh)}</b>`;
+  out.innerHTML = th("add.preview", { paras: paras.length, words: st.tokenCount, unique: st.firstOcc.size, fresh });
 }
 
 async function submitChapter() {
   const text = $("#add-text")?.value || "";
-  const paragraphs = reflowText(text, $("#add-join")?.checked);
+  const lang = addLang();
+  const paragraphs = reflowText(text, $("#add-join")?.checked, lang);
   if (!paragraphs.length) return;
   const btn = $("#add-submit");
   btn.disabled = true;
-  btn.textContent = "Сохраняю…";
+  btn.textContent = t("common.saving");
   try {
-    const heading = /^cap[ií]tulo\b/i.test(paragraphs[0]) ? paragraphs[0] : "";
-    const title = (($("#add-title")?.value || "").trim() || heading || `Глава ${S.chapters.length + 1}`).slice(0, 120);
+    const heading = isChapterHeading(paragraphs[0]) ? paragraphs[0] : "";
+    const sameLang = S.chapters.filter((c) => c.lang === lang).length;
+    const title = (($("#add-title")?.value || "").trim() || heading || t("add.defaultTitle", { n: sameLang + 1 })).slice(0, 120);
     const position = S.chapters.reduce((m, c) => Math.max(m, c.position || 0), 0) + 1;
-    const ch = await S.db.addChapter(title, paragraphs, position);
-    const st = buildStructure(paragraphs);
-    const fresh = [...st.firstOcc.keys()].filter((w) => !S.words.has(w));
-    await S.db.registerWords(fresh, ch.id);
-    for (const w of fresh) S.words.set(w, { word: w, level: 5, quick: null, has_card: false, first_chapter: ch.id, learned_at: null });
+    const ch = await S.db.addChapter(title, paragraphs, position, lang);
+    ch.lang = ch.lang || lang;
+    const st = buildStructure(paragraphs, lang);
+    const known = wordsOf(lang);
+    const fresh = [...st.firstOcc.keys()].filter((w) => !known.has(w));
+    await S.db.registerWords(fresh, ch.id, lang);
+    for (const w of fresh) setRow({ ...blankRow(w, lang), first_chapter: ch.id });
     S.chapters.push(ch);
     closeModal();
     await openChapter(ch.id);
-    toast(`Глава добавлена. Уникальных слов: ${st.firstOcc.size}, новых для вас: ${fresh.length}`);
+    toast(t("add.done", { unique: st.firstOcc.size, fresh: fresh.length }));
   } catch (e) {
-    toast(`Глава не добавилась: ${e.message}`);
+    toast(t("add.failed", { msg: e.message }));
     btn.disabled = false;
-    btn.textContent = "Добавить главу";
+    btn.textContent = t("add.submit");
   }
 }
 
 async function renameChapter(id) {
   const ch = S.chapters.find((c) => c.id === id);
   if (!ch) return;
-  const title = prompt("Новое название главы", ch.title);
+  const title = prompt(t("chapters.renameAsk"), ch.title);
   if (!title || !title.trim()) return;
   try {
     await S.db.renameChapter(id, title.trim());
@@ -702,31 +958,34 @@ async function renameChapter(id) {
     updateChapterSelect();
     renderSettings();
   } catch (e) {
-    toast(`Название не сохранилось: ${e.message}`);
+    toast(t("chapters.renameFailed", { msg: e.message }));
   }
 }
 
 async function deleteChapter(id) {
   const ch = S.chapters.find((c) => c.id === id);
-  if (!ch || !confirm(`Удалить главу «${ch.title}»? Слова, уровни и карточки останутся в словаре.`)) return;
+  if (!ch || !confirm(t("chapters.confirmDelete", { title: ch.title }))) return;
   try {
     await S.db.deleteChapter(id);
     S.chapters = S.chapters.filter((c) => c.id !== id);
     S.chapterWords.delete(id);
-    for (const r of S.words.values()) if (r.first_chapter === id) r.first_chapter = null;
+    for (const r of wordsOf(ch.lang).values()) if (r.first_chapter === id) r.first_chapter = null;
     updateChapterSelect();
     if (S.chapter?.id === id) {
-      if (S.chapters.length) await openChapter(S.chapters.at(-1).id);
+      const next = S.chapters.filter((c) => c.lang === ch.lang).at(-1) || S.chapters.at(-1);
+      if (next) await openChapter(next.id);
       else renderEmpty();
     }
     renderSettings();
-    toast("Глава удалена");
+    toast(t("chapters.deleted"));
   } catch (e) {
-    toast(`Глава не удалилась: ${e.message}`);
+    toast(t("chapters.deleteFailed", { msg: e.message }));
   }
 }
 
-/* ---------------- Панель ---------------- */
+/* ---------------- Panel ---------------- */
+
+const PANEL_TITLES = { word: "panel.word", vocab: "panel.vocab", progress: "panel.progress", settings: "panel.settings" };
 
 function openPanel(mode) {
   S.panel = { open: true, mode };
@@ -734,14 +993,14 @@ function openPanel(mode) {
   d.classList.add("open");
   d.setAttribute("aria-hidden", "false");
   $("#shell").classList.add("shift");
-  $("#drawer-title").textContent = { word: "Слово", vocab: "Мой словарь", progress: "Прогресс", settings: "Настройки" }[mode];
+  $("#drawer-title").textContent = t(PANEL_TITLES[mode]);
   $$(".pp-actions [data-mode]").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
   renderPanel();
   markSelection();
 }
 
 function closePanel(force = false) {
-  if (!force && S.editing && !confirm("Выйти из редактирования без сохранения?")) return;
+  if (!force && S.editing && !confirm(t("confirm.leaveEdit"))) return;
   S.editing = false;
   S.panel = { ...S.panel, open: false };
   const d = $("#drawer");
@@ -755,7 +1014,7 @@ function closePanel(force = false) {
 function togglePanel(mode) {
   if (S.panel.open && S.panel.mode === mode) closePanel();
   else {
-    if (S.editing && !confirm("Выйти из редактирования без сохранения?")) return;
+    if (S.editing && !confirm(t("confirm.leaveEdit"))) return;
     S.editing = false;
     openPanel(mode);
   }
@@ -769,7 +1028,23 @@ function renderPanel() {
   else if (S.panel.mode === "settings") renderSettings();
 }
 
-/* ---------------- Слово ---------------- */
+// Languages that have chapters or words: the vocabulary and progress panels can switch between them.
+function knownLangs() {
+  const set = new Set(chapterLangs());
+  for (const [l, m] of S.vocab) if (m.size) set.add(l);
+  set.add(S.lang);
+  return [...set];
+}
+const panelLang = () => S.panelLang || S.lang;
+
+function panelLangHTML() {
+  const langs = knownLangs();
+  if (langs.length < 2) return "";
+  return `<label class="pp-label" for="panel-lang">${esc(t("panel.language"))}</label>
+    <select class="pp-input pp-panel-lang" id="panel-lang">${langOptions(langs, panelLang(), false)}</select>`;
+}
+
+/* ---------------- Word ---------------- */
 
 function onWordClick(el) {
   const sid = Number(el.dataset.s);
@@ -783,40 +1058,41 @@ function onWordClick(el) {
 }
 
 function selectWord(w, sid, ti) {
-  if (S.editing && S.sel?.w !== w && !confirm("Выйти из редактирования без сохранения?")) return;
+  if (S.editing && S.sel?.w !== w && !confirm(t("confirm.leaveEdit"))) return;
   const tok = S.st?.sentTokens[sid]?.[ti];
   if (!tok) return;
-  S.sel = { w, sid, ti, surface: tok.t };
+  const lang = S.chapter.lang;
+  S.sel = { w, lang, sid, ti, surface: tok.t };
   S.editing = false;
   S.regenOpen = false;
   S.ctxErr = null;
   openPanel("word");
-  ensureQuick(w);
-  ensureFull(w);
-  const row = rowOf(w);
-  if (S.settings.autoCard && apiKey() && !row.has_card && row.level > 1 && !S.gen.has(w)) generateForSelected();
+  ensureQuick(w, false, lang);
+  ensureFull(w, lang);
+  const row = rowOf(w, lang);
+  if (S.settings.autoCard && apiKey() && !row.has_card && row.level > 1 && !S.gen.has(wkey(lang, w))) generateForSelected();
 }
 
-function openWordFromList(w) {
-  const first = S.st?.occ.get(w)?.[0];
+function openWordFromList(w, lang = S.lang) {
+  const first = S.chapter?.lang === lang ? S.st?.occ.get(w)?.[0] : null;
   if (first) {
     selectWord(w, first[0], first[1]);
     requestAnimationFrame(() => scrollToToken(first[0], first[1]));
     return;
   }
-  S.sel = { w, sid: null, ti: null, surface: w };
+  S.sel = { w, lang, sid: null, ti: null, surface: w };
   S.editing = false;
   S.regenOpen = false;
   openPanel("word");
-  ensureQuick(w);
-  ensureFull(w);
+  ensureQuick(w, false, lang);
+  ensureFull(w, lang);
 }
 
 function jumpOcc(dir) {
   if (!S.sel || S.sel.sid == null) return;
   const list = S.st.occ.get(S.sel.w) || [];
   if (list.length < 2) return;
-  const i = list.findIndex(([s, t]) => s === S.sel.sid && t === S.sel.ti);
+  const i = list.findIndex(([s, tt]) => s === S.sel.sid && tt === S.sel.ti);
   const [sid, ti] = list[(i + dir + list.length) % list.length];
   selectWord(S.sel.w, sid, ti);
   scrollToToken(sid, ti);
@@ -824,40 +1100,41 @@ function jumpOcc(dir) {
 
 function moveSelection(dir) {
   const list = S.st.tokenList;
-  let i = list.findIndex(([s, t]) => s === S.sel.sid && t === S.sel.ti);
+  let i = list.findIndex(([s, tt]) => s === S.sel.sid && tt === S.sel.ti);
   for (let k = 0; k < list.length; k++) {
     i += dir;
     if (i < 0 || i >= list.length) return;
-    const [s, t] = list[i];
-    const w = S.st.sentTokens[s][t].w;
-    if (S.settings.highlight !== "all" && rowOf(w).level === 1) continue;
-    selectWord(w, s, t);
-    scrollToToken(s, t);
+    const [s, tt] = list[i];
+    const w = S.st.sentTokens[s][tt].w;
+    if (S.settings.highlight !== "all" && rowOf(w, S.chapter.lang).level === 1) continue;
+    selectWord(w, s, tt);
+    scrollToToken(s, tt);
     return;
   }
 }
 
-async function setLevel(w, level) {
-  const prev = rowOf(w);
-  if (prev.level === level) return;
-  const learned_at = level === 1 ? new Date().toISOString() : null;
-  S.words.set(w, { ...prev, level, learned_at });
-  afterLevelChange(w);
+async function setLevel(w, level, lang = selLang(), extra = {}) {
+  const prev = rowOf(w, lang);
+  if (prev.level === level && !extra.srs) return;
+  const learned_at = level === 1 ? (prev.level === 1 && prev.learned_at) || new Date().toISOString() : null;
+  setRow({ ...prev, level, learned_at, ...extra });
+  afterLevelChange(w, lang);
   try {
-    await S.db.saveWord({ word: w, level, learned_at });
+    await S.db.saveWord({ word: w, lang, level, learned_at, ...extra });
   } catch (e) {
-    S.words.set(w, prev);
-    afterLevelChange(w);
-    toast(`Уровень не сохранился: ${e.message}`);
+    setRow(prev);
+    afterLevelChange(w, lang);
+    toast(t("toast.levelNotSaved", { msg: e.message }));
   }
 }
 
-function afterLevelChange(w) {
-  refreshWordSpans(w);
+function afterLevelChange(w, lang) {
+  refreshWordSpans(w, lang);
   updateChapterStats();
   updateVocabCount();
-  if (S.sel?.w === w) {
-    const lvl = rowOf(w).level;
+  updateReviewCount();
+  if (S.sel?.w === w && S.sel.lang === lang) {
+    const lvl = rowOf(w, lang).level;
     $$("#drawer-body .pp-level").forEach((b) => {
       const on = Number(b.dataset.level) === lvl;
       b.classList.toggle("on", on);
@@ -866,50 +1143,60 @@ function afterLevelChange(w) {
   }
 }
 
-async function ensureQuick(w, force = false) {
-  if (rowOf(w).quick || S.quickBusy.has(w) || !apiKey()) return;
-  if (!force && S.quickErr.has(w)) return;
-  const sid = S.sel?.w === w && S.sel.sid != null ? S.sel.sid : S.st?.firstOcc.get(w)?.sid;
-  const sentence = sid != null ? S.st.sentences[sid].trim().slice(0, 200) : "";
-  S.quickBusy.add(w);
-  S.quickErr.delete(w);
-  patchQuick(w);
+async function ensureQuick(w, force = false, lang = selLang()) {
+  const k = wkey(lang, w);
+  if (!needsQuick(rowOf(w, lang)) || S.quickBusy.has(k) || !apiKey()) return;
+  if (!force && S.quickErr.has(k)) return;
+  let sentence = "";
+  let surface = w;
+  if (S.chapter?.lang === lang && S.st) {
+    const sel = S.sel?.w === w && S.sel.lang === lang && S.sel.sid != null ? S.sel : null;
+    const occ = S.st.firstOcc.get(w);
+    const sid = sel ? sel.sid : occ?.sid;
+    if (sid != null) sentence = S.st.sentences[sid].trim().slice(0, 200);
+    surface = sel?.surface || occ?.surface || w;
+  }
+  S.quickBusy.add(k);
+  S.quickErr.delete(k);
+  patchQuick(w, lang);
   try {
-    const res = await lookupWords({ apiKey: apiKey(), model: S.settings.dictModel, items: [{ word: w, sentence }] });
+    const res = await lookupWords({ apiKey: apiKey(), model: S.settings.dictModel, lang, xl: xl(), items: [{ word: surface, sentence }] });
     const q = res.map.get(w) || [...res.map.values()][0];
-    if (!q) throw new Error("словарь не вернул перевод");
-    await S.db.saveWord({ word: w, quick: q });
-    S.words.set(w, { ...rowOf(w), quick: q });
-    const f = S.full.get(w);
+    if (!q) throw new Error(t("err.noTranslation"));
+    await S.db.saveWord({ word: w, lang, quick: q });
+    setRow({ ...rowOf(w, lang), quick: q });
+    const f = S.full.get(k);
     if (f) f.quick = q;
     addSpent(res.cost);
   } catch (e) {
-    S.quickErr.set(w, e.message || String(e));
+    S.quickErr.set(k, e.message || String(e));
   } finally {
-    S.quickBusy.delete(w);
-    patchQuick(w);
+    S.quickBusy.delete(k);
+    patchQuick(w, lang);
     updateChapterStats();
   }
 }
 
-function patchQuick(w) {
-  if (!isSelected(w) || S.editing) return;
+function patchQuick(w, lang) {
+  if (S.review?.stage === "card" && S.review.revealed && S.review.queue[S.review.i] === w) renderReview();
+  if (!isSelected(w, lang) || S.editing) return;
   const el = $("#wv-quick");
-  if (el) el.innerHTML = quickHTML(w, rowOf(w));
+  if (el) el.innerHTML = quickHTML(w, rowOf(w, lang), lang);
 }
 
-async function ensureFull(w) {
-  if (S.full.has(w)) return;
-  if (!S.words.has(w)) {
-    S.full.set(w, { word: w, card: null, contexts: [], notes: null });
+async function ensureFull(w, lang = selLang()) {
+  const k = wkey(lang, w);
+  if (S.full.has(k)) return;
+  if (!wordsOf(lang).has(w)) {
+    S.full.set(k, { word: w, lang, card: null, contexts: [], notes: null });
     return;
   }
   try {
-    const row = await S.db.getWordFull(w);
-    if (!S.full.has(w)) S.full.set(w, row || { word: w, card: null, contexts: [], notes: null });
-    if (isSelected(w) && !S.editing) renderWordView();
+    const row = await S.db.getWordFull(w, lang);
+    if (!S.full.has(k)) S.full.set(k, row || { word: w, lang, card: null, contexts: [], notes: null });
+    if (isSelected(w, lang) && !S.editing) renderWordView();
   } catch (e) {
-    toast(`Карточка не загрузилась: ${e.message}`);
+    toast(t("toast.cardNotLoaded", { msg: e.message }));
   }
 }
 
@@ -918,56 +1205,66 @@ function generateForSelected(wish = "") {
   if (!sel) return;
   let src = null;
   if (sel.sid != null) {
-    src = { sentence: S.st.sentences[sel.sid].trim(), context: contextAround(S.st.sentences, sel.sid), surface: sel.surface, chapterId: S.chapter.id };
+    src = {
+      sentence: S.st.sentences[sel.sid].trim(),
+      context: contextAround(S.st.sentences, sel.sid, sel.lang),
+      surface: sel.surface,
+      chapterId: S.chapter.id,
+    };
   } else {
-    const c = S.full.get(sel.w)?.contexts?.[0];
+    const c = S.full.get(wkey(sel.lang, sel.w))?.contexts?.[0];
     if (c) src = { sentence: c.s, context: c.s, surface: sel.w, chapterId: c.ch || null };
   }
-  if (!src) return toast("Откройте главу, где встречается это слово, чтобы разобрать его в контексте");
+  if (!src) return toast(t("toast.openChapterFirst"));
   S.regenOpen = false;
-  generateFor(sel.w, src, wish);
+  generateFor(sel.w, sel.lang, src, wish);
 }
 
-function generateFor(w, src, wish = "") {
+function generateFor(w, lang, src, wish = "") {
   const key = apiKey();
   if (!key) {
-    toast("Сначала добавьте API-ключ Anthropic в настройках");
+    toast(t("toast.needKey"));
     openPanel("settings");
     return Promise.resolve(false);
   }
-  if (S.gen.has(w)) return S.gen.get(w).promise;
+  const k = wkey(lang, w);
+  if (S.gen.has(k)) return S.gen.get(k).promise;
   const job = { thinking: "", started: Date.now(), abort: new AbortController() };
-  S.gen.set(w, job);
-  S.genErr.delete(w);
-  if (isSelected(w) && !S.editing) renderWordView();
+  S.gen.set(k, job);
+  S.genErr.delete(k);
+  if (isSelected(w, lang) && !S.editing) renderWordView();
+  const explainIn = xl();
   job.promise = (async () => {
     try {
       const res = await generateCard({
         apiKey: key,
         settings: S.settings,
+        lang,
+        xl: explainIn,
         surface: src.surface,
         sentence: src.sentence,
         context: src.context,
         wish,
         signal: job.abort.signal,
-        onThinking: (t) => {
-          job.thinking = t;
-          patchThinking(w);
+        onThinking: (text) => {
+          job.thinking = text;
+          patchThinking(w, lang);
         },
       });
       const d = res.data;
-      let full = S.full.get(w);
-      if (!full && S.words.has(w)) full = await S.db.getWordFull(w).catch(() => null);
-      full = full || { word: w, contexts: [], notes: null };
+      let full = S.full.get(k);
+      if (!full && wordsOf(lang).has(w)) full = await S.db.getWordFull(w, lang).catch(() => null);
+      full = full || { word: w, lang, contexts: [], notes: null };
       const contexts = [
         ...(full.contexts || []).filter((c) => c.s !== src.sentence),
-        { s: src.sentence, text: d.context, ru: d.sentence_translation, tr: d.translation, ch: src.chapterId },
+        { s: src.sentence, text: d.context, ru: d.sentence_translation, tr: d.translation, ch: src.chapterId, xl: explainIn },
       ].slice(-12);
       const card = {
         lemma: d.lemma,
         translation: d.translation,
         pos: d.pos,
         pronunciation: d.pronunciation,
+        reading: d.reading,
         ipa: d.ipa,
         etymology: d.etymology,
         history: d.history,
@@ -978,6 +1275,7 @@ function generateFor(w, src, wish = "") {
         meta: {
           model: res.model,
           effort: res.effort,
+          xl: explainIn,
           input_tokens: res.usage.input_tokens,
           output_tokens: res.usage.output_tokens,
           cost: res.cost,
@@ -985,28 +1283,31 @@ function generateFor(w, src, wish = "") {
           ...(wish ? { wish } : {}),
         },
       };
-      const quick = rowOf(w).quick || { translation: d.translation, pronunciation: d.pronunciation, ipa: d.ipa, pos: d.pos, lemma: d.lemma };
-      await S.db.saveWord({ word: w, card, contexts, quick });
-      S.full.set(w, { ...full, card, contexts, quick });
-      S.words.set(w, { ...rowOf(w), quick, has_card: true });
+      const row = rowOf(w, lang);
+      const quick = needsQuick(row)
+        ? { translation: d.translation, pronunciation: d.pronunciation, reading: d.reading, ipa: d.ipa, pos: d.pos, lemma: d.lemma, xl: explainIn }
+        : row.quick;
+      await S.db.saveWord({ word: w, lang, card, contexts, quick });
+      S.full.set(k, { ...full, card, contexts, quick });
+      setRow({ ...rowOf(w, lang), quick, has_card: true });
       addSpent(res.cost);
       return true;
     } catch (e) {
-      if (e?.name !== "AbortError") S.genErr.set(w, e.message || String(e));
+      if (e?.name !== "AbortError") S.genErr.set(k, e.message || String(e));
       return false;
     } finally {
-      S.gen.delete(w);
-      if (isSelected(w) && !S.editing) renderWordView();
+      S.gen.delete(k);
+      if (isSelected(w, lang) && !S.editing) renderWordView();
       updateChapterStats();
     }
   })();
   return job.promise;
 }
 
-function patchThinking(w) {
-  if (!isSelected(w)) return;
+function patchThinking(w, lang) {
+  if (!isSelected(w, lang)) return;
   const el = $("#gen-thinking");
-  const job = S.gen.get(w);
+  const job = S.gen.get(wkey(lang, w));
   if (!el || !job) return;
   el.textContent = job.thinking.slice(-1800);
   el.scrollTop = el.scrollHeight;
@@ -1016,289 +1317,315 @@ async function explainHere() {
   const sel = S.sel;
   if (!sel || sel.sid == null) return;
   if (!apiKey()) {
-    toast("Сначала добавьте API-ключ Anthropic в настройках");
+    toast(t("toast.needKey"));
     return openPanel("settings");
   }
-  const w = sel.w;
+  const { w, lang } = sel;
+  const k = wkey(lang, w);
   const sentence = S.st.sentences[sel.sid].trim();
-  const base = S.full.get(w)?.card || rowOf(w).quick || {};
-  S.ctxJob = { w, sid: sel.sid };
+  const base = S.full.get(k)?.card || rowOf(w, lang).quick || {};
+  S.ctxJob = { w, lang, sid: sel.sid };
   S.ctxErr = null;
   renderWordView();
   try {
     const res = await explainContext({
       apiKey: apiKey(),
       settings: S.settings,
+      lang,
+      xl: xl(),
       surface: sel.surface,
       lemma: base.lemma,
       translation: base.translation,
       sentence,
-      context: contextAround(S.st.sentences, sel.sid),
+      context: contextAround(S.st.sentences, sel.sid, lang),
     });
-    const fresh = S.full.get(w) || { word: w, contexts: [] };
+    const fresh = S.full.get(k) || { word: w, lang, contexts: [] };
     const contexts = [
       ...(fresh.contexts || []).filter((c) => c.s !== sentence),
-      { s: sentence, text: res.data.context, ru: res.data.sentence_translation, tr: res.data.translation, ch: S.chapter.id },
+      { s: sentence, text: res.data.context, ru: res.data.sentence_translation, tr: res.data.translation, ch: S.chapter.id, xl: xl() },
     ].slice(-12);
-    await S.db.saveWord({ word: w, contexts });
-    S.full.set(w, { ...fresh, contexts });
+    await S.db.saveWord({ word: w, lang, contexts });
+    S.full.set(k, { ...fresh, contexts });
     addSpent(res.cost);
   } catch (e) {
     S.ctxErr = e.message || String(e);
   } finally {
     S.ctxJob = null;
-    if (isSelected(w) && !S.editing) renderWordView();
+    if (isSelected(w, lang) && !S.editing) renderWordView();
   }
 }
 
-/* ----- HTML карточки ----- */
+/* ----- Card HTML ----- */
 
 function renderWordView() {
   const body = $("#drawer-body");
   if (!body || S.panel.mode !== "word") return;
   const sel = S.sel;
   if (!sel) {
-    body.innerHTML = `<p class="pp-note pp-pad">Нажмите на любое слово в тексте.</p>`;
+    body.innerHTML = `<p class="pp-note pp-pad">${esc(t("word.pick"))}</p>`;
     return;
   }
-  const w = sel.w;
-  const row = rowOf(w);
-  const full = S.full.get(w);
-  const keep = S.renderedWord === w ? body.scrollTop : 0;
+  const { w, lang } = sel;
+  const row = rowOf(w, lang);
+  const full = S.full.get(wkey(lang, w));
+  const keep = S.renderedWord === wkey(lang, w) ? body.scrollTop : 0;
   if (S.editing) {
     body.innerHTML = editHTML(sel, row, full);
   } else {
     const first = row.first_chapter ? chapterTitle(row.first_chapter) : "";
     body.innerHTML = `<div class="pp-wv">
-      <div class="pp-headword" lang="es"><span>${esc(sel.surface)}</span><button class="pp-icon-btn sm" data-act="speak" data-text="${esc(sel.surface)}" title="Произнести" aria-label="Произнести слово">${I.volume}</button></div>
-      <div id="wv-quick">${quickHTML(w, row)}</div>
+      <div class="pp-headword" ${readerLangAttrs(lang)}><span>${esc(sel.surface)}</span><button class="pp-icon-btn sm" data-act="speak" data-text="${esc(sel.surface)}" data-lang="${esc(lang)}" title="${esc(t("word.say"))}" aria-label="${esc(t("word.say"))}">${I.volume}</button></div>
+      <div id="wv-quick">${quickHTML(w, row, lang)}</div>
       ${levelsHTML(row)}
-      ${dictLinksHTML(w, row, full)}
+      ${dictLinksHTML(w, row, full, lang)}
       ${sentenceHTML(sel, row, full)}
       ${cardHTML(sel, row, full)}
-      ${full?.notes ? `<section class="pp-sec"><h3 class="pp-h">Мои заметки</h3><p class="pp-notes">${esc(full.notes)}</p></section>` : ""}
-      ${first ? `<p class="pp-note pp-first">Впервые встретилось в главе «${esc(first)}».</p>` : ""}
+      ${full?.notes ? `<section class="pp-sec"><h3 class="pp-h">${esc(t("word.notes"))}</h3><p class="pp-notes">${esc(full.notes)}</p></section>` : ""}
+      ${first ? `<p class="pp-note pp-first">${esc(t("word.firstSeen", { title: first }))}</p>` : ""}
     </div>`;
   }
   body.scrollTop = keep;
-  S.renderedWord = w;
+  S.renderedWord = wkey(lang, w);
 }
 
-function quickHTML(w, row) {
+function quickChips(q, w, lang) {
+  return [
+    q.pronunciation && `<span class="pp-chip">[${esc(q.pronunciation)}]</span>`,
+    q.reading && `<span class="pp-chip" lang="${esc(lang)}">${esc(q.reading)}</span>`,
+    q.ipa && `<span class="pp-chip">/${esc(String(q.ipa).replace(/^\/|\/$/g, ""))}/</span>`,
+    q.pos && `<span class="pp-chip">${esc(q.pos)}</span>`,
+    q.lemma && wordKey(q.lemma, lang) !== w && `<span class="pp-chip">${esc(t("word.lemma"))} <b lang="${esc(lang)}">${esc(q.lemma)}</b></span>`,
+  ]
+    .filter(Boolean)
+    .join("");
+}
+
+function quickHTML(w, row, lang) {
   const q = row.quick;
-  if (q && (q.translation || q.pronunciation)) {
-    const chips = [
-      q.pronunciation && `<span class="pp-chip">[${esc(q.pronunciation)}]</span>`,
-      q.ipa && `<span class="pp-chip">/${esc(String(q.ipa).replace(/^\/|\/$/g, ""))}/</span>`,
-      q.pos && `<span class="pp-chip">${esc(q.pos)}</span>`,
-      q.lemma && q.lemma.toLowerCase() !== w && `<span class="pp-chip">словарная форма <b lang="es">${esc(q.lemma)}</b></span>`,
-    ]
-      .filter(Boolean)
-      .join("");
-    return `${q.translation ? `<div class="pp-tr">${esc(q.translation)}</div>` : ""}<div class="pp-chips">${chips}</div>`;
+  const busy = S.quickBusy.has(wkey(lang, w));
+  if (q && (q.translation || q.pronunciation) && !busy) {
+    return `${q.translation ? `<div class="pp-tr">${esc(q.translation)}</div>` : ""}<div class="pp-chips">${quickChips(q, w, lang)}</div>`;
   }
   if (!apiKey())
-    return `<p class="pp-note">Перевод и произношение появятся, когда вы добавите API-ключ Anthropic в <button class="pp-link" data-act="panel" data-mode="settings">настройках</button>.</p>`;
-  if (S.quickErr.has(w))
-    return `<div class="pp-error"><p>Перевод не загрузился: ${esc(S.quickErr.get(w))}</p><button class="pp-soft-btn" data-act="retry-quick">Повторить</button></div>`;
+    return `<p class="pp-note">${th("word.noKey", { settings: `<button class="pp-link" data-act="panel" data-mode="settings">${esc(t("empty.settingsLink"))}</button>` }, ["settings"])}</p>`;
+  const err = S.quickErr.get(wkey(lang, w));
+  if (err) return `<div class="pp-error"><p>${esc(t("word.quickFailed", { msg: err }))}</p><button class="pp-soft-btn" data-act="retry-quick">${esc(t("common.retry"))}</button></div>`;
   return `<div class="pp-sk" style="width:46%;height:20px"></div><div class="pp-sk" style="width:72%"></div>`;
 }
 
 function levelsHTML(row) {
-  return `<div class="pp-levels" role="group" aria-label="Насколько хорошо вы знаете слово">
+  return `<div class="pp-levels" role="group" aria-label="${esc(t("level.groupLabel"))}">
     ${[5, 4, 3, 2, 1]
       .map(
         (l) =>
-          `<button class="pp-level lv${l}${row.level === l ? " on" : ""}" data-act="level" data-level="${l}" aria-pressed="${row.level === l}"><b>${l}</b><span>${LEVEL_LABEL[l]}</span></button>`
+          `<button class="pp-level lv${l}${row.level === l ? " on" : ""}" data-act="level" data-level="${l}" aria-pressed="${row.level === l}"><b>${l}</b><span>${esc(t(`level.${l}`))}</span></button>`
       )
       .join("")}
   </div>
-  <p class="pp-hint">Клавиши 1–5 ставят уровень, стрелки ← → переходят к соседнему слову.</p>`;
+  <p class="pp-hint">${esc(t("level.hint"))}</p>`;
 }
 
-function dictLinksHTML(w, row, full) {
-  const lemma = String(row.quick?.lemma || full?.card?.lemma || w).toLowerCase();
-  const e = encodeURIComponent;
-  return `<div class="pp-dicts" aria-label="Внешние словари">
-    <a href="https://dle.rae.es/${e(lemma)}" target="_blank" rel="noopener noreferrer">RAE ${I.link}</a>
-    <a href="https://ru.wiktionary.org/wiki/${e(lemma)}" target="_blank" rel="noopener noreferrer">Викисловарь ${I.link}</a>
-    <a href="https://context.reverso.net/translation/spanish-russian/${e(w)}" target="_blank" rel="noopener noreferrer">Reverso ${I.link}</a>
-    <a href="https://forvo.com/word/${e(w)}/#es" target="_blank" rel="noopener noreferrer">Forvo ${I.link}</a>
-  </div>`;
+function dictLinksHTML(w, row, full, lang) {
+  const lemma = row.quick?.lemma || full?.card?.lemma || w;
+  return `<div class="pp-dicts" aria-label="${esc(t("word.dicts"))}">${dictLinks(lang, w, lemma, xl())
+    .map((d) => `<a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${esc(d.label)} ${I.link}</a>`)
+    .join("")}</div>`;
 }
 
 function sentenceHTML(sel, row, full) {
-  const w = sel.w;
+  const { w, lang } = sel;
   if (sel.sid == null) {
     const list = full?.contexts || [];
     if (!list.length) return "";
-    return `<section class="pp-sec"><h3 class="pp-h">Где встречалось</h3>${list
+    return `<section class="pp-sec"><h3 class="pp-h">${esc(t("word.seenIn"))}</h3>${list
       .map(
         (c) =>
-          `<div class="pp-ctx-item"><p class="pp-sent" lang="es">${esc(c.s)}</p>${c.ru ? `<p class="pp-sent-ru">${esc(c.ru)}</p>` : ""}${c.text ? `<p>${esc(c.text)}</p>` : ""}</div>`
+          `<div class="pp-ctx-item"><p class="pp-sent" ${readerLangAttrs(lang)}>${esc(c.s)}</p>${c.ru ? `<p class="pp-sent-ru">${esc(c.ru)}</p>` : ""}${c.text ? `<p>${esc(c.text)}</p>` : ""}</div>`
       )
       .join("")}</section>`;
   }
   const sentence = S.st.sentences[sel.sid].trim();
   const tokens = S.st.sentTokens[sel.sid];
   const occ = S.st.occ.get(w) || [];
-  const pos = occ.findIndex(([s, t]) => s === sel.sid && t === sel.ti);
+  const pos = occ.findIndex(([s, tt]) => s === sel.sid && tt === sel.ti);
   const here = (full?.contexts || []).find((c) => c.s === sentence);
   const sentInner = tokens
-    .map((t, ti) =>
-      t.w
-        ? `<span class="pp-wd l${rowOf(t.w).level}${t.w === w ? (ti === sel.ti ? " is-cur" : " is-same") : ""}" data-w="${esc(t.w)}" data-s="${sel.sid}" data-i="${ti}">${esc(t.t)}</span>`
-        : esc(t.t)
+    .map((tk, ti) =>
+      tk.w
+        ? `<span class="pp-wd l${rowOf(tk.w, lang).level}${tk.w === w ? (ti === sel.ti ? " is-cur" : " is-same") : ""}" data-w="${esc(tk.w)}" data-s="${sel.sid}" data-i="${ti}">${esc(tk.t)}</span>`
+        : esc(tk.t)
     )
     .join("");
   let why;
   if (here?.text) {
     const qt = String(row.quick?.translation || "").toLowerCase();
     const showTr = here.tr && qt && !qt.includes(String(here.tr).toLowerCase());
-    why = `<p>${esc(here.text)}${showTr ? ` <span class="pp-here-tr">Здесь: «${esc(here.tr)}».</span>` : ""}</p>`;
-  } else if (S.gen.has(w)) why = `<p class="pp-note">Объяснение появится вместе с разбором слова.</p>`;
-  else if (S.ctxJob?.w === w) why = skel(2);
+    why = `<p>${esc(here.text)}${showTr ? ` <span class="pp-here-tr">${esc(t("word.hereTr", { tr: here.tr }))}</span>` : ""}</p>`;
+  } else if (S.gen.has(wkey(lang, w))) why = `<p class="pp-note">${esc(t("word.whyWithCard"))}</p>`;
+  else if (S.ctxJob?.w === w && S.ctxJob.lang === lang) why = skel(2);
   else if (row.has_card || full?.card)
-    why = `${S.ctxErr ? `<p class="pp-error-line">${esc(S.ctxErr)}</p>` : ""}<button class="pp-soft-btn" data-act="explain-here">${I.sparkles} Объяснить это место</button>`;
-  else why = `<p class="pp-note">Появится после разбора слова.</p>`;
+    why = `${S.ctxErr ? `<p class="pp-error-line">${esc(S.ctxErr)}</p>` : ""}<button class="pp-soft-btn" data-act="explain-here">${I.sparkles} ${esc(t("word.explainHere"))}</button>`;
+  else why = `<p class="pp-note">${esc(t("word.whyAfterCard"))}</p>`;
 
   return `<section class="pp-sec">
-    <div class="pp-sec-h"><h3 class="pp-h">В этом месте истории</h3>${
+    <div class="pp-sec-h"><h3 class="pp-h">${esc(t("word.inStory"))}</h3>${
       occ.length > 1
-        ? `<span class="pp-occ"><button data-act="occ" data-dir="-1" aria-label="Предыдущее место в тексте">${I.left}</button>${pos + 1} из ${occ.length}<button data-act="occ" data-dir="1" aria-label="Следующее место в тексте">${I.right}</button></span>`
+        ? `<span class="pp-occ"><button data-act="occ" data-dir="-1" aria-label="${esc(t("word.prevOcc"))}">${I.left}</button>${esc(t("word.occOf", { i: pos + 1, n: occ.length }))}<button data-act="occ" data-dir="1" aria-label="${esc(t("word.nextOcc"))}">${I.right}</button></span>`
         : ""
     }</div>
     <div class="pp-sent-wrap">
-      <p class="pp-sent hl-${esc(S.settings.highlight)}" data-hl lang="es">${sentInner}</p>
-      <button class="pp-icon-btn sm pp-sent-say" data-act="speak" data-text="${esc(sentence)}" title="Прочитать вслух" aria-label="Прочитать предложение вслух">${I.volume}</button>
+      <p class="pp-sent hl-${esc(S.settings.highlight)}" data-hl ${readerLangAttrs(lang)}>${sentInner}</p>
+      <button class="pp-icon-btn sm pp-sent-say" data-act="speak" data-text="${esc(sentence)}" data-lang="${esc(lang)}" title="${esc(t("word.readAloud"))}" aria-label="${esc(t("word.readAloud"))}">${I.volume}</button>
     </div>
     ${here?.ru ? `<p class="pp-sent-ru">${esc(here.ru)}</p>` : ""}
-    <h3 class="pp-h pp-h-gap">Почему здесь это слово</h3>
+    <h3 class="pp-h pp-h-gap">${esc(t("word.why"))}</h3>
     ${why}
   </section>`;
 }
 
 function effortText(modelId, effort) {
   const info = modelInfo(modelId);
-  return info.efforts && effort ? `, размышление ${EFFORTS[effort] || effort}` : "";
+  return info.efforts && effort ? t("model.effortSuffix", { effort: t(`effort.${effort}`).toLowerCase() }) : "";
 }
 
 function cardHTML(sel, row, full) {
-  const w = sel.w;
-  const job = S.gen.get(w);
+  const { w, lang } = sel;
+  const k = wkey(lang, w);
+  const job = S.gen.get(k);
   const card = full?.card;
   const info = modelInfo(S.settings.cardModel);
+  const err = S.genErr.get(k);
   if (job) {
-    const showThinking = S.settings.showThinking && (info.thinking === "adaptive" || info.thinking === "always");
+    const showThinking = S.settings.showThinking && info.thinking === "adaptive";
     return `<section class="pp-sec pp-gen">
-      <div class="pp-gen-h"><span class="pp-spin">${I.loader}</span><span>Claude разбирает слово: ${esc(info.name)}${esc(effortText(info.id, S.settings.cardEffort))}. Прошло <span id="gen-elapsed">${Math.round((Date.now() - job.started) / 1000)} с</span>.</span></div>
-      ${showThinking ? `<div class="pp-thinking" id="gen-thinking" aria-live="polite">${esc(job.thinking.slice(-1800)) || "Модель думает. Краткий ход рассуждений появится здесь."}</div>` : ""}
+      <div class="pp-gen-h"><span class="pp-spin">${I.loader}</span><span>${esc(t("gen.working", { model: info.name + effortText(info.id, S.settings.cardEffort) }))} <span id="gen-elapsed">${esc(t("gen.seconds", { n: Math.round((Date.now() - job.started) / 1000) }))}</span></span></div>
+      ${showThinking ? `<div class="pp-thinking" id="gen-thinking" aria-live="polite">${esc(job.thinking.slice(-1800)) || esc(t("gen.thinkingPlaceholder"))}</div>` : ""}
       ${skel(4)}
-      <button class="pp-soft-btn" data-act="gen-cancel">Отменить разбор</button>
+      <button class="pp-soft-btn" data-act="gen-cancel">${esc(t("gen.cancel"))}</button>
     </section>`;
   }
   if (row.has_card && !full) return `<section class="pp-sec">${skel(5)}</section>`;
   if (!card) {
     const est = estimateCardCost(S.settings.cardModel, S.settings.cardEffort);
     return `<section class="pp-sec pp-cta">
-      ${S.genErr.has(w) ? `<div class="pp-error"><p>Разбор не получился: ${esc(S.genErr.get(w))}</p></div>` : ""}
-      <button class="pp-primary" data-act="gen-card">${I.sparkles} Разобрать слово с Claude</button>
-      <p class="pp-note">${esc(info.name)}${esc(effortText(info.id, S.settings.cardEffort))}.${info.custom ? "" : ` Примерная цена одного разбора: около ${money(est)}.`}</p>
-      <button class="pp-link" data-act="edit">Заполнить карточку вручную</button>
+      ${err ? `<div class="pp-error"><p>${esc(t("gen.failed", { msg: err }))}</p></div>` : ""}
+      <button class="pp-primary" data-act="gen-card">${I.sparkles} ${esc(t("gen.button"))}</button>
+      <p class="pp-note">${esc(info.name + effortText(info.id, S.settings.cardEffort))}.${info.custom ? "" : ` ${esc(t("gen.estimate", { cost: money(est) }))}`}</p>
+      <button class="pp-link" data-act="edit">${esc(t("gen.manual"))}</button>
     </section>`;
   }
-  const fm = FACT_META[String(card.fact_type || "").toLowerCase()] || ["💡", "Интересный факт", "wow"];
+  const fk = factKey(card.fact_type);
   const meta = card.meta || {};
   const metaLine = meta.manual
-    ? "Карточка заполнена вручную."
+    ? t("card.manual")
     : meta.model
-      ? `Разобрано моделью ${esc(modelInfo(meta.model).name)}${esc(effortText(meta.model, meta.effort))}. Токенов: ${fmtInt((meta.input_tokens || 0) + (meta.output_tokens || 0))}, стоимость около ${money(meta.cost || 0)}.`
+      ? t("card.meta", {
+          model: modelInfo(meta.model).name + effortText(meta.model, meta.effort),
+          tokens: fmtInt((meta.input_tokens || 0) + (meta.output_tokens || 0)),
+          cost: money(meta.cost || 0),
+        })
       : "";
-  const sec = (title, text) => (text ? `<section class="pp-sec"><h3 class="pp-h">${title}</h3><p>${esc(text)}</p></section>` : "");
+  const sec = (title, text) => (text ? `<section class="pp-sec"><h3 class="pp-h">${esc(title)}</h3><p>${esc(text)}</p></section>` : "");
   const qt = String(row.quick?.translation || "").toLowerCase();
+  const otherXl = !meta.manual && cardXl(card) !== xl();
   return `
-    ${card.translation && qt && !qt.includes(String(card.translation).toLowerCase()) ? `<p class="pp-note pp-card-tr">В разборе переведено как <b>${esc(card.translation)}</b>.</p>` : ""}
-    ${sec("Происхождение", card.etymology)}
-    ${sec("История слова", card.history)}
-    ${card.fact ? `<section class="pp-sec"><div class="pp-fact" data-k="${fm[2]}"><div class="pp-fact-h"><span class="pp-fact-emoji" aria-hidden="true">${fm[0]}</span>${fm[1]}</div><p>${esc(card.fact)}</p></div></section>` : ""}
-    ${card.relatives?.length ? `<section class="pp-sec"><h3 class="pp-h">Родственные слова</h3><div class="pp-chips">${card.relatives.map((r) => `<span class="pp-chip">${esc(r)}</span>`).join("")}</div></section>` : ""}
-    ${card.mnemonic ? `<section class="pp-sec"><div class="pp-mn">${I.bulb}<div><h3 class="pp-h">Как запомнить</h3><p>${esc(card.mnemonic)}</p></div></div></section>` : ""}
+    ${card.translation && qt && !qt.includes(String(card.translation).toLowerCase()) ? `<p class="pp-note pp-card-tr">${th("card.translatedAs", { tr: card.translation })}</p>` : ""}
+    ${otherXl ? `<div class="pp-error pp-card-xl"><p>${esc(t("card.otherXl", { lang: langName(cardXl(card)) }))}</p><button class="pp-soft-btn" data-act="regen-xl">${I.sparkles} ${esc(t("card.regenXl", { lang: langName(xl()) }))}</button></div>` : ""}
+    ${sec(t("card.etymology"), card.etymology)}
+    ${sec(t("card.history"), card.history)}
+    ${card.fact ? `<section class="pp-sec"><div class="pp-fact" data-k="${fk}"><div class="pp-fact-h"><span class="pp-fact-emoji" aria-hidden="true">${FACT_EMOJI[fk]}</span>${esc(t(`fact.${fk}.title`))}</div><p>${esc(card.fact)}</p></div></section>` : ""}
+    ${card.relatives?.length ? `<section class="pp-sec"><h3 class="pp-h">${esc(t("card.relatives"))}</h3><div class="pp-chips">${card.relatives.map((r) => `<span class="pp-chip">${esc(r)}</span>`).join("")}</div></section>` : ""}
+    ${card.mnemonic ? `<section class="pp-sec"><div class="pp-mn">${I.bulb}<div><h3 class="pp-h">${esc(t("card.mnemonic"))}</h3><p>${esc(card.mnemonic)}</p></div></div></section>` : ""}
     <section class="pp-sec pp-card-foot">
-      ${S.genErr.has(w) ? `<div class="pp-error"><p>Перегенерация не получилась: ${esc(S.genErr.get(w))}</p></div>` : ""}
+      ${err ? `<div class="pp-error"><p>${esc(t("gen.regenFailed", { msg: err }))}</p></div>` : ""}
       ${
         S.regenOpen
-          ? `<label class="pp-label" for="regen-wish">Что изменить в новом разборе (необязательно)</label>
-             <textarea class="pp-input" id="regen-wish" rows="2" placeholder="Например: сделай факт жутче или добавь пример из песни"></textarea>
-             <div class="pp-row"><button class="pp-primary" data-act="regen-go">${I.sparkles} Перегенерировать</button><button class="pp-soft-btn" data-act="regen-close">Отмена</button></div>
-             <p class="pp-note">Новый разбор заменит текст карточки, включая ваши правки. Заметки и уровень останутся.</p>`
-          : `<div class="pp-row"><button class="pp-soft-btn" data-act="edit">${I.edit} Редактировать</button><button class="pp-soft-btn" data-act="regen-open">${I.sparkles} Перегенерировать</button></div>`
+          ? `<label class="pp-label" for="regen-wish">${esc(t("regen.wishLabel"))}</label>
+             <textarea class="pp-input" id="regen-wish" rows="2" placeholder="${esc(t("regen.wishPlaceholder"))}"></textarea>
+             <div class="pp-row"><button class="pp-primary" data-act="regen-go">${I.sparkles} ${esc(t("regen.go"))}</button><button class="pp-soft-btn" data-act="regen-close">${esc(t("common.cancel"))}</button></div>
+             <p class="pp-note">${esc(t("regen.note"))}</p>`
+          : `<div class="pp-row"><button class="pp-soft-btn" data-act="edit">${I.edit} ${esc(t("card.edit"))}</button><button class="pp-soft-btn" data-act="regen-open">${I.sparkles} ${esc(t("regen.go"))}</button></div>`
       }
-      ${metaLine ? `<p class="pp-note">${metaLine}</p>` : ""}
-      <p class="pp-note">Разбор написан ИИ. Этимологию и факты полезно сверять со словарями.</p>
+      ${metaLine ? `<p class="pp-note">${esc(metaLine)}</p>` : ""}
+      <p class="pp-note">${esc(t("card.aiNote"))}</p>
     </section>`;
 }
 
 function editHTML(sel, row, full) {
+  const { lang } = sel;
   const q = row.quick || {};
   const c = full?.card || {};
   const attached = sel.sid != null;
   const sentence = attached ? S.st.sentences[sel.sid].trim() : "";
   const here = attached ? (full?.contexts || []).find((x) => x.s === sentence) || {} : null;
   const field = (id, label, value, rows = 0, extra = "") =>
-    `<label class="pp-label" for="${id}">${label}</label>${
+    `<label class="pp-label" for="${id}">${esc(label)}</label>${
       rows
         ? `<textarea class="pp-input" id="${id}" rows="${rows}" ${extra}>${esc(value || "")}</textarea>`
         : `<input class="pp-input" id="${id}" value="${esc(value || "")}" ${extra}>`
     }`;
+  const showReading = !!langInfo(lang).reading || !!q.reading;
   return `<div class="pp-wv pp-edit">
-    <div class="pp-headword" lang="es"><span>${esc(sel.surface)}</span></div>
-    <p class="pp-note">Меняйте любые поля. Пустые поля в карточке не показываются.</p>
-    <fieldset class="pp-fieldset"><legend>Словарь</legend>
-      ${field("e-q-translation", "Перевод", q.translation)}
-      ${field("e-q-pronunciation", "Произношение русскими буквами", q.pronunciation)}
-      ${field("e-q-ipa", "Транскрипция МФА", q.ipa)}
-      ${field("e-q-pos", "Часть речи и форма", q.pos)}
-      ${field("e-q-lemma", "Словарная форма", q.lemma, 0, 'lang="es"')}
+    <div class="pp-headword" ${readerLangAttrs(lang)}><span>${esc(sel.surface)}</span></div>
+    <p class="pp-note">${esc(t("edit.lead"))}</p>
+    <fieldset class="pp-fieldset"><legend>${esc(t("edit.dict"))}</legend>
+      ${field("e-q-translation", t("edit.translation"), q.translation)}
+      ${field("e-q-pronunciation", t("edit.pronunciation"), q.pronunciation)}
+      ${showReading ? field("e-q-reading", t("edit.reading"), q.reading, 0, `lang="${esc(lang)}"`) : ""}
+      ${field("e-q-ipa", t("edit.ipa"), q.ipa)}
+      ${field("e-q-pos", t("edit.pos"), q.pos)}
+      ${field("e-q-lemma", t("edit.lemma"), q.lemma, 0, `lang="${esc(lang)}"`)}
     </fieldset>
     ${
       attached
-        ? `<fieldset class="pp-fieldset"><legend>В этом месте истории</legend>
-      <p class="pp-sent" lang="es">${esc(sentence)}</p>
-      ${field("e-h-ru", "Перевод предложения", here.ru, 2)}
-      ${field("e-h-tr", "Перевод слова в этом месте", here.tr)}
-      ${field("e-h-text", "Почему здесь это слово", here.text, 3)}
+        ? `<fieldset class="pp-fieldset"><legend>${esc(t("word.inStory"))}</legend>
+      <p class="pp-sent" ${readerLangAttrs(lang)}>${esc(sentence)}</p>
+      ${field("e-h-ru", t("edit.sentenceTr"), here.ru, 2)}
+      ${field("e-h-tr", t("edit.hereTr"), here.tr)}
+      ${field("e-h-text", t("word.why"), here.text, 3)}
     </fieldset>`
         : ""
     }
-    <fieldset class="pp-fieldset"><legend>Разбор</legend>
-      ${field("e-c-translation", "Перевод в разборе", c.translation)}
-      ${field("e-c-etymology", "Происхождение", c.etymology, 3)}
-      ${field("e-c-history", "История слова", c.history, 4)}
-      <label class="pp-label" for="e-c-fact_type">Какой это факт</label>
+    <fieldset class="pp-fieldset"><legend>${esc(t("edit.card"))}</legend>
+      ${field("e-c-translation", t("edit.cardTr"), c.translation)}
+      ${field("e-c-etymology", t("card.etymology"), c.etymology, 3)}
+      ${field("e-c-history", t("card.history"), c.history, 4)}
+      <label class="pp-label" for="e-c-fact_type">${esc(t("edit.factType"))}</label>
       <select class="pp-input" id="e-c-fact_type">${FACT_TYPES.map(
-        (t) => `<option value="${t}"${String(c.fact_type || "").toLowerCase() === t ? " selected" : ""}>${t}</option>`
+        (ft) => `<option value="${ft}"${factKey(c.fact_type) === ft ? " selected" : ""}>${esc(t(`fact.${ft}`))}</option>`
       ).join("")}</select>
-      ${field("e-c-fact", "Факт", c.fact, 3)}
-      ${field("e-c-relatives", "Родственные слова, по одному в строке", (c.relatives || []).join("\n"), 3)}
-      ${field("e-c-mnemonic", "Как запомнить", c.mnemonic, 2)}
+      ${field("e-c-fact", t("edit.fact"), c.fact, 3)}
+      ${field("e-c-relatives", t("edit.relatives"), (c.relatives || []).join("\n"), 3)}
+      ${field("e-c-mnemonic", t("card.mnemonic"), c.mnemonic, 2)}
     </fieldset>
-    <fieldset class="pp-fieldset"><legend>Мои заметки</legend>
-      ${field("e-notes", "Заметки к слову", full?.notes, 3)}
+    <fieldset class="pp-fieldset"><legend>${esc(t("word.notes"))}</legend>
+      ${field("e-notes", t("edit.notes"), full?.notes, 3)}
     </fieldset>
-    <div class="pp-row pp-edit-actions"><button class="pp-primary" data-act="edit-save">Сохранить</button><button class="pp-soft-btn" data-act="edit-cancel">Отмена</button></div>
+    <div class="pp-row pp-edit-actions"><button class="pp-primary" data-act="edit-save">${esc(t("common.save"))}</button><button class="pp-soft-btn" data-act="edit-cancel">${esc(t("common.cancel"))}</button></div>
   </div>`;
 }
 
 async function saveEdit() {
   const sel = S.sel;
   if (!sel) return;
-  const w = sel.w;
-  const row = rowOf(w);
-  const full = S.full.get(w) || { word: w, contexts: [], card: null, notes: null };
+  const { w, lang } = sel;
+  const k = wkey(lang, w);
+  const row = rowOf(w, lang);
+  const full = S.full.get(k) || { word: w, lang, contexts: [], card: null, notes: null };
   const v = (id) => ($(`#${id}`)?.value ?? "").trim();
 
-  const quickRaw = { translation: v("e-q-translation"), pronunciation: v("e-q-pronunciation"), ipa: v("e-q-ipa"), pos: v("e-q-pos"), lemma: v("e-q-lemma") };
-  const quick = Object.values(quickRaw).some(Boolean) ? quickRaw : null;
+  const quickRaw = {
+    translation: v("e-q-translation"),
+    pronunciation: v("e-q-pronunciation"),
+    reading: v("e-q-reading"),
+    ipa: v("e-q-ipa"),
+    pos: v("e-q-pos"),
+    lemma: v("e-q-lemma"),
+  };
+  const changed = Object.keys(quickRaw).some((f) => quickRaw[f] !== String(row.quick?.[f] || ""));
+  let quick = Object.values(quickRaw).some(Boolean) ? { ...quickRaw, xl: quickXl(row.quick) } : null;
+  // Hand-made changes are kept even if the explanation language changes later.
+  if (quick && (changed || row.quick?.manual)) quick = { ...quick, xl: xl(), manual: true };
 
   const fields = {
     translation: v("e-c-translation"),
@@ -1309,10 +1636,14 @@ async function saveEdit() {
     relatives: v("e-c-relatives").split("\n").map((s) => s.trim()).filter(Boolean),
     mnemonic: v("e-c-mnemonic"),
   };
-  const hasText = ["translation", "etymology", "history", "fact", "mnemonic"].some((k) => fields[k]) || fields.relatives.length > 0;
-  const shared = { lemma: quickRaw.lemma, pos: quickRaw.pos, pronunciation: quickRaw.pronunciation, ipa: quickRaw.ipa };
+  const hasText = ["translation", "etymology", "history", "fact", "mnemonic"].some((f) => fields[f]) || fields.relatives.length > 0;
+  const shared = { lemma: quickRaw.lemma, pos: quickRaw.pos, pronunciation: quickRaw.pronunciation, reading: quickRaw.reading, ipa: quickRaw.ipa };
   let card = null;
-  if (hasText) card = full.card ? { ...full.card, ...shared, ...fields } : { ...shared, ...fields, meta: { manual: true, at: new Date().toISOString() } };
+  if (hasText) {
+    card = full.card
+      ? { ...full.card, ...shared, ...fields }
+      : { ...shared, ...fields, meta: { manual: true, xl: xl(), at: new Date().toISOString() } };
+  }
 
   let contexts = full.contexts || [];
   if (sel.sid != null && $("#e-h-text")) {
@@ -1326,39 +1657,40 @@ async function saveEdit() {
   const btn = $('[data-act="edit-save"]');
   if (btn) {
     btn.disabled = true;
-    btn.textContent = "Сохраняю…";
+    btn.textContent = t("common.saving");
   }
   try {
-    await S.db.saveWord({ word: w, quick, card, contexts, notes });
-    S.full.set(w, { ...full, quick, card, contexts, notes });
-    S.words.set(w, { ...row, quick, has_card: !!card });
+    await S.db.saveWord({ word: w, lang, quick, card, contexts, notes });
+    S.full.set(k, { ...full, quick, card, contexts, notes });
+    setRow({ ...row, quick, has_card: !!card });
     S.editing = false;
     renderWordView();
     updateChapterStats();
-    toast("Изменения сохранены");
+    toast(t("edit.saved"));
   } catch (e) {
-    toast(`Не сохранилось: ${e.message}`);
+    toast(t("edit.failed", { msg: e.message }));
     if (btn) {
       btn.disabled = false;
-      btn.textContent = "Сохранить";
+      btn.textContent = t("common.save");
     }
   }
 }
 
-/* ---------------- Словарь главы и массовый разбор ---------------- */
+/* ---------------- Chapter dictionary and bulk analysis ---------------- */
 
 async function prepareDictionary(manual = false) {
   if (!S.st || !S.chapter) return;
   if (!apiKey()) {
-    if (manual) toast("Сначала добавьте API-ключ Anthropic в настройках");
+    if (manual) toast(t("toast.needKey"));
     return;
   }
   if (S.dict.running) return;
+  const lang = S.chapter.lang;
   const missing = [...S.st.firstOcc.entries()]
-    .filter(([w]) => !rowOf(w).quick)
-    .map(([w, o]) => ({ word: w, sentence: S.st.sentences[o.sid].trim().slice(0, 160) }));
+    .filter(([w]) => needsQuick(rowOf(w, lang)))
+    .map(([w, o]) => ({ key: w, word: o.surface, sentence: S.st.sentences[o.sid].trim().slice(0, 160) }));
   if (!missing.length) {
-    if (manual) toast("Словарь этой главы уже готов");
+    if (manual) toast(t("dict.ready"));
     return;
   }
   const token = {};
@@ -1368,19 +1700,25 @@ async function prepareDictionary(manual = false) {
   let failed = null;
   for (let i = 0; i < missing.length; i += DICT_BATCH) {
     if (S.dict.token !== token) return;
-    const batch = missing.slice(i, i + DICT_BATCH).filter((it) => !rowOf(it.word).quick);
+    const batch = missing.slice(i, i + DICT_BATCH).filter((it) => needsQuick(rowOf(it.key, lang)));
     if (batch.length) {
       try {
-        const res = await lookupWords({ apiKey: apiKey(), model: S.settings.dictModel, items: batch });
-        const rows = batch.filter((it) => res.map.has(it.word)).map((it) => ({ word: it.word, quick: res.map.get(it.word) }));
+        const res = await lookupWords({
+          apiKey: apiKey(),
+          model: S.settings.dictModel,
+          lang,
+          xl: xl(),
+          items: batch.map(({ word, sentence }) => ({ word, sentence })),
+        });
+        const rows = batch.filter((it) => res.map.has(it.key)).map((it) => ({ word: it.key, lang, quick: res.map.get(it.key) }));
         await S.db.saveWords(rows);
         for (const r of rows) {
-          S.words.set(r.word, { ...rowOf(r.word), quick: r.quick });
-          const f = S.full.get(r.word);
+          setRow({ ...rowOf(r.word, lang), quick: r.quick });
+          const f = S.full.get(wkey(lang, r.word));
           if (f) f.quick = r.quick;
         }
         addSpent(res.cost);
-        if (S.sel && rows.some((r) => r.word === S.sel.w)) patchQuick(S.sel.w);
+        if (S.sel && S.sel.lang === lang && rows.some((r) => r.word === S.sel.w)) patchQuick(S.sel.w, lang);
       } catch (e) {
         failed = e;
         break;
@@ -1394,7 +1732,7 @@ async function prepareDictionary(manual = false) {
   S.dict = { running: false, done: 0, total: 0, token: null };
   updateTopProgress();
   updateChapterStats();
-  if (failed) toast(`Словарь остановился: ${failed.message}`);
+  if (failed) toast(t("dict.stoppedError", { msg: failed.message }));
 }
 
 function stopDictionary(silent = false) {
@@ -1402,23 +1740,24 @@ function stopDictionary(silent = false) {
   S.dict = { running: false, done: 0, total: 0, token: null };
   updateTopProgress();
   updateChapterStats();
-  if (!silent) toast("Подготовка словаря остановлена");
+  if (!silent) toast(t("dict.stopped"));
 }
 
 async function bulkAnalyze() {
   if (!S.st) return;
   if (!apiKey()) {
-    toast("Сначала добавьте API-ключ Anthropic в настройках");
+    toast(t("toast.needKey"));
     return openPanel("settings");
   }
-  const todo = [...S.st.firstOcc.entries()].filter(([w]) => rowOf(w).level > 1 && !rowOf(w).has_card);
-  if (!todo.length) return toast("Все неизученные слова этой главы уже разобраны");
+  const lang = S.chapter.lang;
+  const todo = [...S.st.firstOcc.entries()].filter(([w]) => rowOf(w, lang).level > 1 && !rowOf(w, lang).has_card);
+  if (!todo.length) return toast(t("bulk.nothing"));
   const info = modelInfo(S.settings.cardModel);
   const est = estimateCardCost(S.settings.cardModel, S.settings.cardEffort) * todo.length;
   const ok = confirm(
-    `Разобрать ${todo.length} ${plural(todo.length, "слово", "слова", "слов")} моделью ${info.name}${effortText(info.id, S.settings.cardEffort)}?\n` +
-      (info.custom ? "" : `Очень грубая оценка стоимости: около ${money(est)}.\n`) +
-      "Слова с уровнем 1 пропускаются. Остановить можно в любой момент."
+    `${t("bulk.confirm", { n: todo.length, model: info.name + effortText(info.id, S.settings.cardEffort) })}\n` +
+      (info.custom ? "" : `${t("bulk.estimate", { cost: money(est) })}\n`) +
+      t("bulk.confirmNote")
   );
   if (!ok) return;
   const token = {};
@@ -1433,19 +1772,19 @@ async function bulkAnalyze() {
   const worker = async () => {
     while (queue.length && S.bulk.token === token) {
       const [w, o] = queue.shift();
-      if (!rowOf(w).has_card && rowOf(w).level > 1) {
-        const done = await generateFor(w, {
+      if (!rowOf(w, lang).has_card && rowOf(w, lang).level > 1) {
+        const done = await generateFor(w, lang, {
           sentence: st.sentences[o.sid].trim(),
-          context: contextAround(st.sentences, o.sid),
+          context: contextAround(st.sentences, o.sid, lang),
           surface: o.surface,
           chapterId,
         });
         if (!done) {
           failures++;
-          lastError = S.genErr.get(w) || lastError;
+          lastError = S.genErr.get(wkey(lang, w)) || lastError;
           if (failures >= 3 && S.bulk.token === token) {
             S.bulk = { running: false, done: 0, total: 0, token: null };
-            toast(`Разбор остановлен после нескольких ошибок: ${lastError}`, 7000);
+            toast(t("bulk.stoppedErrors", { msg: lastError }), 7000);
           }
         }
       }
@@ -1458,7 +1797,7 @@ async function bulkAnalyze() {
   await Promise.all([worker(), worker()]);
   if (S.bulk.token === token) {
     S.bulk = { running: false, done: 0, total: 0, token: null };
-    toast(failures ? `Разбор закончен, ошибок: ${failures}` : "Все неизученные слова главы разобраны");
+    toast(failures ? t("bulk.doneErrors", { n: failures }) : t("bulk.done"));
   }
   updateTopProgress();
   updateChapterStats();
@@ -1468,18 +1807,221 @@ function stopBulk() {
   S.bulk = { running: false, done: 0, total: 0, token: null };
   updateTopProgress();
   updateChapterStats();
-  toast("Разбор остановлен. Слова, которые уже в работе, досчитаются.");
+  toast(t("bulk.stopped"));
 }
 
-/* ---------------- Мой словарь ---------------- */
+/* ---------------- Review ---------------- */
+
+function dueCount(lang = S.lang) {
+  const now = Date.now();
+  let n = 0;
+  for (const r of wordsOf(lang).values()) if (r.srs?.due && Date.parse(r.srs.due) <= now) n++;
+  return n;
+}
+
+function updateReviewCount() {
+  const el = $("#review-count");
+  if (!el) return;
+  const n = dueCount();
+  el.hidden = n === 0;
+  el.textContent = n > 999 ? `${Math.floor(n / 1000)}k` : String(n);
+}
+
+const chapterScopeAvailable = (lang) => S.chapter?.lang === lang && !!S.st;
+
+// Due words first, then new ones: words you rated 4–2 come before untouched words.
+function reviewPools(lang, scope) {
+  const now = Date.now();
+  const only = scope === "chapter" && chapterScopeAvailable(lang) ? S.chapterWords.get(S.chapter.id) : null;
+  const due = [];
+  const fresh = [];
+  for (const r of wordsOf(lang).values()) {
+    if (only && !only.has(r.word)) continue;
+    if (r.srs?.due) {
+      if (Date.parse(r.srs.due) <= now) due.push(r);
+    } else if (r.level > 1 && r.quick?.translation) fresh.push(r);
+  }
+  due.sort((a, b) => Date.parse(a.srs.due) - Date.parse(b.srs.due));
+  const rank = (r) => (r.level < 5 ? 0 : r.has_card ? 1 : 2);
+  const order = only ? new Map([...S.st.firstOcc.keys()].map((w, i) => [w, i])) : null;
+  const rnd = new Map(fresh.map((r) => [r.word, Math.random()]));
+  fresh.sort((a, b) => rank(a) - rank(b) || (order ? order.get(a.word) - order.get(b.word) : rnd.get(a.word) - rnd.get(b.word)));
+  return { due, fresh };
+}
+
+function openReview() {
+  if (S.editing && !confirm(t("confirm.leaveEdit"))) return;
+  if (S.editing) {
+    S.editing = false;
+    renderPanel();
+  }
+  const scope = chapterScopeAvailable(S.lang) ? "chapter" : "all";
+  S.review = { stage: "start", scope, lang: S.lang };
+  renderReview();
+}
+
+function startReview() {
+  const rv = S.review;
+  const { due, fresh } = reviewPools(rv.lang, rv.scope);
+  const queue = [...due.slice(0, REVIEW_MAX_DUE), ...fresh.slice(0, S.settings.reviewNew)].map((r) => r.word);
+  if (!queue.length) return;
+  Object.assign(rv, { stage: "card", queue, i: 0, revealed: false, again: new Map(), seen: 0, known: 0 });
+  renderReview();
+}
+
+function revealReview() {
+  const rv = S.review;
+  if (!rv || rv.stage !== "card" || rv.revealed) return;
+  rv.revealed = true;
+  renderReview();
+}
+
+function rateReview(level) {
+  const rv = S.review;
+  if (!rv || rv.stage !== "card" || !rv.revealed) return;
+  const w = rv.queue[rv.i];
+  setLevel(w, level, rv.lang, { srs: schedule(rowOf(w, rv.lang).srs, level) });
+  rv.seen++;
+  if (level <= 2) rv.known++;
+  // "Don't know" comes back a few cards later, at most twice per session.
+  if (level === 5) {
+    const n = rv.again.get(w) || 0;
+    if (n < 2) {
+      rv.again.set(w, n + 1);
+      rv.queue.splice(Math.min(rv.queue.length, rv.i + 5), 0, w);
+    }
+  }
+  rv.i++;
+  rv.revealed = false;
+  if (rv.i >= rv.queue.length) rv.stage = "done";
+  renderReview();
+}
+
+// The sentence to show with a card: from the open chapter, or from a saved explanation.
+function reviewContext(w, lang, full) {
+  if (chapterScopeAvailable(lang)) {
+    const first = S.st.occ.get(w)?.[0];
+    if (first) {
+      const [sid, ti] = first;
+      const tokens = S.st.sentTokens[sid];
+      const html = tokens.map((tk, i) => (tk.w && i === ti ? `<mark class="pp-rv-mark">${esc(tk.t)}</mark>` : esc(tk.t))).join("");
+      const sentence = S.st.sentences[sid].trim();
+      const ru = (full?.contexts || []).find((c) => c.s === sentence)?.ru || "";
+      return { html, ru, surface: tokens[ti].t };
+    }
+  }
+  const c = (full?.contexts || [])[0];
+  if (!c?.s) return null;
+  const tokens = tokenize(c.s, lang);
+  const hit = tokens.find((tk) => tk.w === w);
+  const html = tokens.map((tk) => (tk.w === w ? `<mark class="pp-rv-mark">${esc(tk.t)}</mark>` : esc(tk.t))).join("");
+  return { html, ru: c.ru || "", surface: hit?.t || w };
+}
+
+function reviewStartHTML(rv) {
+  const lname = langName(rv.lang);
+  const chapterOk = chapterScopeAvailable(rv.lang);
+  if (!chapterOk) rv.scope = "all";
+  const { due, fresh } = reviewPools(rv.lang, rv.scope);
+  const nDue = Math.min(due.length, REVIEW_MAX_DUE);
+  const nNew = Math.min(fresh.length, S.settings.reviewNew);
+  const total = nDue + nNew;
+  const scopeBtn = (val, label) =>
+    `<button role="radio" aria-checked="${rv.scope === val}" class="${rv.scope === val ? "on" : ""}" data-act="rv-scope" data-val="${val}">${esc(label)}</button>`;
+  return `<div class="pp-rv-start">
+    ${chapterOk ? `<div class="pp-seg" role="radiogroup" aria-label="${esc(t("rv.scope"))}">${scopeBtn("chapter", t("rv.scopeChapter"))}${scopeBtn("all", t("rv.scopeAll", { lang: lname }))}</div>` : ""}
+    <div class="pp-rv-stats">
+      <div><b>${fmtInt(nDue)}</b><span>${esc(t("rv.due"))}</span></div>
+      <div><b>${fmtInt(nNew)}</b><span>${esc(t("rv.new"))}</span></div>
+    </div>
+    ${
+      total
+        ? `<button class="pp-primary" data-act="rv-start">${I.cards} ${esc(t("rv.start", { n: total }))}</button>`
+        : `<p class="pp-lead">${esc(t("rv.nothing"))}</p>`
+    }
+    ${fresh.length > nNew ? `<p class="pp-note">${esc(t("rv.moreNew", { n: fresh.length - nNew }))}</p>` : ""}
+    <p class="pp-note">${esc(t("rv.how"))}</p>
+  </div>`;
+}
+
+function reviewCardHTML(rv) {
+  const w = rv.queue[rv.i];
+  const lang = rv.lang;
+  const row = rowOf(w, lang);
+  const full = S.full.get(wkey(lang, w));
+  const ctx = reviewContext(w, lang, full);
+  const surface = ctx?.surface || w;
+  const q = row.quick || {};
+  let html = `<div class="pp-rv-card">
+    <div class="pp-rv-word" ${readerLangAttrs(lang)}><span>${esc(surface)}</span><button class="pp-icon-btn sm" data-act="speak" data-text="${esc(surface)}" data-lang="${esc(lang)}" title="${esc(t("word.say"))}" aria-label="${esc(t("word.say"))}">${I.volume}</button></div>
+    ${ctx ? `<p class="pp-sent pp-rv-sent" ${readerLangAttrs(lang)}>${ctx.html}</p>` : ""}`;
+  if (!rv.revealed) {
+    html += `<button class="pp-primary pp-rv-show" data-act="rv-show">${esc(t("rv.show"))}</button>
+      <p class="pp-hint">${esc(t("rv.showHint"))}</p>`;
+  } else {
+    html += `<div class="pp-rv-answer">
+      ${q.translation ? `<div class="pp-tr">${esc(q.translation)}</div>` : ""}
+      <div class="pp-chips">${quickChips(q, w, lang)}</div>
+      ${ctx?.ru ? `<p class="pp-sent-ru">${esc(ctx.ru)}</p>` : ""}
+      ${full?.card?.mnemonic ? `<div class="pp-mn">${I.bulb}<p>${esc(full.card.mnemonic)}</p></div>` : ""}
+    </div>
+    <div class="pp-levels pp-rv-levels" role="group" aria-label="${esc(t("rv.rateLabel"))}">${[5, 4, 3, 2, 1]
+      .map(
+        (l) =>
+          `<button class="pp-level lv${l}" data-act="rv-rate" data-level="${l}"><b>${l}</b><span>${esc(t(`level.${l}`))}</span><i>${esc(ivlLabel(schedule(row.srs, l).ivl))}</i></button>`
+      )
+      .join("")}</div>
+    <p class="pp-hint">${esc(t("rv.rateHint"))}</p>`;
+  }
+  return `${html}</div>`;
+}
+
+function reviewDoneHTML(rv) {
+  return `<div class="pp-rv-start">
+    <h2 class="pp-rv-done">${esc(t("rv.doneTitle"))}</h2>
+    <p class="pp-lead">${esc(t("rv.doneText", { n: rv.seen, known: rv.known }))}</p>
+    <div class="pp-row"><button class="pp-primary" data-act="rv-close">${esc(t("rv.finish"))}</button><button class="pp-soft-btn" data-act="rv-again">${esc(t("rv.more"))}</button></div>
+  </div>`;
+}
+
+function renderReview() {
+  const rv = S.review;
+  const root = $("#modal-root");
+  if (!rv || !root) return;
+  let body;
+  let progress = "";
+  if (rv.stage === "start") body = reviewStartHTML(rv);
+  else if (rv.stage === "card") {
+    body = reviewCardHTML(rv);
+    progress = `<span class="pp-rv-count">${esc(t("rv.progress", { i: rv.i + 1, n: rv.queue.length }))}</span>`;
+  } else body = reviewDoneHTML(rv);
+  const bar = rv.stage === "card" ? `<div class="pp-rv-bar"><i style="width:${(rv.i / rv.queue.length) * 100}%"></i></div>` : "";
+  root.innerHTML = `<div class="pp-modal">
+    <div class="pp-modal-card pp-rv" role="dialog" aria-modal="true" aria-label="${esc(t("rv.title", { lang: langName(rv.lang) }))}">
+      <div class="pp-drawer-h"><span>${esc(t("rv.title", { lang: langName(rv.lang) }))}</span>${progress}<button class="pp-icon-btn sm" data-act="rv-close" aria-label="${esc(t("common.close"))}">${I.x}</button></div>
+      ${bar}${body}
+    </div></div>`;
+  if (rv.stage === "card") {
+    const w = rv.queue[rv.i];
+    if (!S.full.has(wkey(rv.lang, w))) {
+      ensureFull(w, rv.lang).then(() => {
+        if (S.review === rv && rv.stage === "card" && rv.queue[rv.i] === w) renderReview();
+      });
+    }
+    if (!rowOf(w, rv.lang).quick && apiKey()) ensureQuick(w, false, rv.lang);
+  }
+}
+
+/* ---------------- My vocabulary ---------------- */
 
 function renderVocab() {
   const body = $("#drawer-body");
   body.innerHTML = `<div class="pp-vocab">
-    <label class="pp-search"><input data-role="vocab-search" value="${esc(S.vocab.q)}" placeholder="Поиск по словам и переводам" aria-label="Поиск по словарю"></label>
-    <div class="pp-filter" role="group" aria-label="Фильтр по уровню">
-      ${[[0, "Все уровни"], [5, "5"], [4, "4"], [3, "3"], [2, "2"], [1, "1"]]
-        .map(([l, t]) => `<button class="pp-chip-btn lv${l}${S.vocab.level === l ? " on" : ""}" data-act="vocab-level" data-level="${l}">${t}</button>`)
+    ${panelLangHTML()}
+    <label class="pp-search"><input data-role="vocab-search" value="${esc(S.vfilter.q)}" placeholder="${esc(t("vocab.search"))}" aria-label="${esc(t("vocab.search"))}"></label>
+    <div class="pp-filter" role="group" aria-label="${esc(t("vocab.filter"))}">
+      ${[[0, t("vocab.allLevels")], [5, "5"], [4, "4"], [3, "3"], [2, "2"], [1, "1"]]
+        .map(([l, label]) => `<button class="pp-chip-btn lv${l}${S.vfilter.level === l ? " on" : ""}" data-act="vocab-level" data-level="${l}">${esc(label)}</button>`)
         .join("")}
     </div>
     <div id="vocab-list"></div>
@@ -1490,96 +2032,107 @@ function renderVocab() {
 function renderVocabList() {
   const box = $("#vocab-list");
   if (!box) return;
-  const q = S.vocab.q.trim().toLowerCase();
-  let rows = [...S.words.values()];
-  if (S.vocab.level) rows = rows.filter((r) => r.level === S.vocab.level);
-  if (q) rows = rows.filter((r) => r.word.includes(q) || String(r.quick?.translation || "").toLowerCase().includes(q));
-  rows.sort((a, b) => a.word.localeCompare(b.word, "es"));
-  box.innerHTML = `<p class="pp-note">${rows.length ? `Слов: ${fmtInt(rows.length)}` : S.words.size ? "Ничего не найдено." : "Словарь пока пуст. Добавьте главу."}</p>
+  const lang = panelLang();
+  const words = wordsOf(lang);
+  const q = searchKey(S.vfilter.q.trim());
+  let rows = [...words.values()];
+  if (S.vfilter.level) rows = rows.filter((r) => r.level === S.vfilter.level);
+  if (q) rows = rows.filter((r) => searchKey(r.word).includes(q) || searchKey(r.quick?.translation).includes(q));
+  rows.sort((a, b) => a.word.localeCompare(b.word, lang));
+  box.innerHTML = `<p class="pp-note">${esc(rows.length ? t("vocab.count", { n: rows.length }) : words.size ? t("vocab.notFound") : t("vocab.empty"))}</p>
     <ul class="pp-vlist">${rows
       .slice(0, 600)
       .map(
         (r) =>
-          `<li><button data-act="open-word" data-w="${esc(r.word)}"><span class="pp-dot lv${r.level}" title="Уровень ${r.level}"></span><span class="pp-v-word" lang="es">${esc(r.word)}</span><span class="pp-v-tr">${esc(r.quick?.translation || "")}</span></button></li>`
+          `<li><button data-act="open-word" data-w="${esc(r.word)}" data-lang="${esc(lang)}"><span class="pp-dot lv${r.level}" title="${esc(t("level.title", { l: r.level }))}"></span><span class="pp-v-word" ${readerLangAttrs(lang)}>${esc(r.word)}</span><span class="pp-v-tr">${esc(r.quick?.translation || "")}</span></button></li>`
       )
       .join("")}</ul>
-    ${rows.length > 600 ? `<p class="pp-note">Показаны первые 600 слов. Уточните поиск.</p>` : ""}`;
+    ${rows.length > 600 ? `<p class="pp-note">${esc(t("vocab.first600"))}</p>` : ""}`;
 }
 
-/* ---------------- Прогресс ---------------- */
+/* ---------------- Progress ---------------- */
 
 function renderProgress() {
   const body = $("#drawer-body");
+  const lang = panelLang();
   const c = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
   let cards = 0;
   let week = 0;
+  let reviewed = 0;
   const weekAgo = Date.now() - 7 * 864e5;
-  for (const r of S.words.values()) {
+  for (const r of wordsOf(lang).values()) {
     c[r.level]++;
     if (r.has_card) cards++;
     if (r.level === 1 && r.learned_at && Date.parse(r.learned_at) > weekAgo) week++;
+    if (r.srs) reviewed++;
   }
-  const total = S.words.size;
+  const total = wordsOf(lang).size;
   body.innerHTML = `
     <section class="pp-sec pp-sec-first">
-      <h3 class="pp-h">Все слова</h3>
-      <p class="pp-big">Выучено <b>${fmtInt(c[1])}</b> из <b>${fmtInt(total)}</b></p>
+      ${panelLangHTML()}
+      <h3 class="pp-h pp-mt">${esc(t("prog.allWords", { lang: langName(lang) }))}</h3>
+      <p class="pp-big">${th("prog.learned", { learned: c[1], total })}</p>
       ${[5, 4, 3, 2, 1]
         .map(
-          (l) => `<div class="pp-prog-row"><span class="pp-dot lv${l}"></span><span class="pp-prog-label">${l}, ${LEVEL_LABEL[l]}</span>
+          (l) => `<div class="pp-prog-row"><span class="pp-dot lv${l}"></span><span class="pp-prog-label">${l}, ${esc(t(`level.${l}`))}</span>
           <span class="pp-prog-bar"><i class="lb${l}" style="width:${total ? (c[l] / total) * 100 : 0}%"></i></span><b>${fmtInt(c[l])}</b></div>`
         )
         .join("")}
     </section>
     <section class="pp-sec">
-      <h3 class="pp-h">Работа</h3>
-      <p>За последние 7 дней выучено: <b>${fmtInt(week)}</b>.</p>
-      <p>Подробных разборов: <b>${fmtInt(cards)}</b>.</p>
-      <p>Потрачено на Claude API примерно: <b>${money(S.settings.spent || 0)}</b>. <button class="pp-link" data-act="reset-spent">Обнулить</button></p>
+      <h3 class="pp-h">${esc(t("prog.work"))}</h3>
+      <p>${th("prog.week", { n: week })}</p>
+      <p>${th("prog.cards", { n: cards })}</p>
+      <p>${th("prog.review", { n: reviewed, due: dueCount(lang) })}</p>
+      <p>${th("prog.spent", { cost: money(S.settings.spent || 0) })} <button class="pp-link" data-act="reset-spent">${esc(t("prog.reset"))}</button></p>
     </section>
     <section class="pp-sec">
-      <h3 class="pp-h">Главы</h3>
-      <div id="prog-chapters">${chaptersProgressHTML()}</div>
+      <h3 class="pp-h">${esc(t("prog.chapters"))}</h3>
+      <div id="prog-chapters">${chaptersProgressHTML(lang)}</div>
     </section>`;
-  loadChapterWords();
+  loadChapterWords(lang);
 }
 
-function chaptersProgressHTML() {
-  if (!S.chapters.length) return `<p class="pp-note">Глав пока нет.</p>`;
-  return S.chapters
+function chaptersProgressHTML(lang) {
+  const list = S.chapters.filter((ch) => ch.lang === lang);
+  if (!list.length) return `<p class="pp-note">${esc(t("prog.noChapters"))}</p>`;
+  return list
     .map((ch) => {
       const set = S.chapterWords.get(ch.id);
-      if (!set) return `<div class="pp-prog-ch"><span>${esc(ch.title)}</span><span class="pp-note">считаю…</span></div>`;
-      const c = levelCounts(set);
+      if (!set) return `<div class="pp-prog-ch"><span>${esc(ch.title)}</span><span class="pp-note">${esc(t("prog.counting"))}</span></div>`;
+      const c = levelCounts(set, lang);
       const pct = set.size ? Math.round((c[1] / set.size) * 100) : 0;
       return `<div class="pp-prog-ch"><div class="pp-prog-ch-h"><span>${esc(ch.title)}</span><b>${pct}%</b></div><div class="pp-levelbar">${levelBarHTML(c)}</div></div>`;
     })
     .join("");
 }
 
-async function loadChapterWords() {
+async function loadChapterWords(lang) {
   for (const ch of S.chapters) {
-    if (S.chapterWords.has(ch.id)) continue;
+    if (ch.lang !== lang || S.chapterWords.has(ch.id)) continue;
     try {
       const full = await S.db.getChapter(ch.id);
-      S.chapterWords.set(ch.id, new Set(buildStructure(full.paragraphs).firstOcc.keys()));
+      S.chapterWords.set(ch.id, new Set(buildStructure(full.paragraphs, ch.lang).firstOcc.keys()));
     } catch {
       S.chapterWords.set(ch.id, new Set());
     }
-    if (S.panel.open && S.panel.mode === "progress" && $("#prog-chapters")) $("#prog-chapters").innerHTML = chaptersProgressHTML();
+    if (S.panel.open && S.panel.mode === "progress" && $("#prog-chapters")) $("#prog-chapters").innerHTML = chaptersProgressHTML(panelLang());
   }
 }
 
-/* ---------------- Настройки ---------------- */
+/* ---------------- Settings ---------------- */
 
 function modelOptions(selected) {
-  const known = MODELS.some((m) => m.id === selected);
+  const known = MODELS.some((m) => m.id === selected) || modelInfo(selected).id !== selected;
+  const opt = (m) =>
+    `<option value="${m.id}"${m.id === modelInfo(selected).id ? " selected" : ""}>${esc(
+      t("model.option", { name: m.name, inPrice: m.inPrice, outPrice: m.outPrice, note: t(`model.note.${m.id}`) })
+    )}</option>`;
   return (
-    MODELS.map(
-      (m) => `<option value="${m.id}"${m.id === selected ? " selected" : ""}>${m.name} — $${m.inPrice} / $${m.outPrice} за млн токенов, ${m.note}</option>`
-    ).join("") +
+    MODELS.filter((m) => !m.legacy).map(opt).join("") +
+    `<optgroup label="${esc(t("model.older"))}">${MODELS.filter((m) => m.legacy).map(opt).join("")}</optgroup>` +
     (known ? "" : `<option value="${esc(selected)}" selected>${esc(selected)}</option>`) +
-    `<option value="__custom">Другая модель: ввести ID…</option>`
+    `<option value="__custom">${esc(t("model.custom"))}</option>`
   );
 }
 
@@ -1591,107 +2144,127 @@ function renderSettings() {
   const cm = modelInfo(s.cardModel);
   const seg = (k, opts) =>
     `<div class="pp-seg" role="radiogroup">${opts
-      .map(([v, l]) => `<button role="radio" aria-checked="${s[k] === v}" class="${s[k] === v ? "on" : ""}" data-act="seg" data-key="${k}" data-val="${v}">${l}</button>`)
+      .map(([v, l]) => `<button role="radio" aria-checked="${s[k] === v}" class="${s[k] === v ? "on" : ""}" data-act="seg" data-key="${k}" data-val="${v}">${esc(l)}</button>`)
       .join("")}</div>`;
   const est = estimateCardCost(s.cardModel, s.cardEffort);
   body.innerHTML = `
     <section class="pp-sec pp-sec-first">
-      <h3 class="pp-h">Ключ Claude API</h3>
-      <p class="pp-note">Ключ хранится только в этом браузере и уходит напрямую в Anthropic. На другом устройстве его нужно ввести снова. Оплата API идёт отдельно от подписки claude.ai.</p>
-      <input class="pp-input" id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" value="${key ? `••••••••${esc(key.slice(-4))}` : ""}">
-      <div class="pp-row pp-mt">
-        <button class="pp-primary" data-act="save-key">Сохранить ключ</button>
-        ${key ? `<button class="pp-soft-btn" data-act="check-key">Проверить</button><button class="pp-soft-btn" data-act="clear-key">Удалить</button>` : ""}
-      </div>
-      <p class="pp-note pp-mt" id="key-status">${key ? "Ключ сохранён." : "Ключа нет, поэтому перевод и разбор слов недоступны."}</p>
+      <h3 class="pp-h">${esc(t("set.languages"))}</h3>
+      <label class="pp-label" for="set-ui-lang">${esc(t("set.uiLang"))}</label>
+      <select class="pp-input" id="set-ui-lang" data-set="uiLang">${UI_LANGS.map(
+        ([code, label]) => `<option value="${code}"${code === uiLang() ? " selected" : ""}>${esc(label)}</option>`
+      ).join("")}</select>
+      <label class="pp-label" for="set-xl">${esc(t("set.explainLang"))}</label>
+      <select class="pp-input" id="set-xl" data-set="explainLang">${langOptions(EXPLAIN_LANGS, s.explainLang, true)}</select>
+      <p class="pp-note pp-mt">${esc(t("set.explainNote"))}</p>
     </section>
 
     <section class="pp-sec">
-      <h3 class="pp-h">Подробный разбор слова</h3>
-      <label class="pp-label" for="set-card-model">Модель</label>
+      <h3 class="pp-h">${esc(t("key.title"))}</h3>
+      <p class="pp-note">${esc(t("key.note"))}</p>
+      <input class="pp-input" id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" value="${key ? `••••••••${esc(key.slice(-4))}` : ""}">
+      <div class="pp-row pp-mt">
+        <button class="pp-primary" data-act="save-key">${esc(t("key.save"))}</button>
+        ${key ? `<button class="pp-soft-btn" data-act="check-key">${esc(t("key.check"))}</button><button class="pp-soft-btn" data-act="clear-key">${esc(t("key.delete"))}</button>` : ""}
+      </div>
+      <p class="pp-note pp-mt" id="key-status">${esc(key ? t("key.saved") : t("key.none"))}</p>
+    </section>
+
+    <section class="pp-sec">
+      <h3 class="pp-h">${esc(t("set.cardTitle"))}</h3>
+      <label class="pp-label" for="set-card-model">${esc(t("set.model"))}</label>
       <select class="pp-input" id="set-card-model" data-set="cardModel">${modelOptions(s.cardModel)}</select>
       ${
         cm.efforts
-          ? `<label class="pp-label" for="set-effort">Глубина размышления</label>
+          ? `<label class="pp-label" for="set-effort">${esc(t("set.effort"))}</label>
              <select class="pp-input" id="set-effort" data-set="cardEffort">${cm.efforts
-               .map((e) => `<option value="${e}"${s.cardEffort === e ? " selected" : ""}>${EFFORTS[e][0].toUpperCase() + EFFORTS[e].slice(1)}</option>`)
+               .map((e) => `<option value="${e}"${s.cardEffort === e ? " selected" : ""}>${esc(t(`effort.${e}`))}</option>`)
                .join("")}</select>
-             <p class="pp-note">«Максимальное» думает дольше всех и стоит дороже. Для одного слова обычно хватает высокого.</p>
-             <label class="pp-check"><input type="checkbox" data-set="showThinking"${s.showThinking ? " checked" : ""}> Показывать краткий ход размышлений во время разбора</label>`
+             <p class="pp-note">${esc(t("set.effortNote"))}</p>
+             <label class="pp-check"><input type="checkbox" data-set="showThinking"${s.showThinking ? " checked" : ""}> ${esc(t("set.showThinking"))}</label>`
           : cm.thinking === "manual"
-            ? `<label class="pp-check"><input type="checkbox" data-set="haikuThinking"${s.haikuThinking ? " checked" : ""}> Включить размышление перед ответом</label>`
+            ? `<label class="pp-check"><input type="checkbox" data-set="haikuThinking"${s.haikuThinking ? " checked" : ""}> ${esc(t("set.haikuThinking"))}</label>`
             : ""
       }
-      <label class="pp-check"><input type="checkbox" data-set="autoCard"${s.autoCard ? " checked" : ""}> Разбирать слово сразу при нажатии, без кнопки</label>
-      ${cm.custom ? "" : `<p class="pp-note">Один разбор с этими настройками стоит примерно ${money(est)}. Точная цена видна в каждой карточке.</p>`}
+      <label class="pp-check"><input type="checkbox" data-set="autoCard"${s.autoCard ? " checked" : ""}> ${esc(t("set.autoCard"))}</label>
+      ${cm.custom ? "" : `<p class="pp-note">${esc(t("set.cardCost", { cost: money(est) }))}</p>`}
     </section>
 
     <section class="pp-sec">
-      <h3 class="pp-h">Быстрый словарь</h3>
-      <p class="pp-note">Перевод и произношение, которые появляются сразу при нажатии на слово.</p>
-      <label class="pp-label" for="set-dict-model">Модель для словаря</label>
+      <h3 class="pp-h">${esc(t("set.dictTitle"))}</h3>
+      <p class="pp-note">${esc(t("set.dictNote"))}</p>
+      <label class="pp-label" for="set-dict-model">${esc(t("set.dictModel"))}</label>
       <select class="pp-input" id="set-dict-model" data-set="dictModel">${modelOptions(s.dictModel)}</select>
-      <label class="pp-check"><input type="checkbox" data-set="autoDict"${s.autoDict ? " checked" : ""}> Готовить словарь для всей главы при её открытии</label>
+      <label class="pp-check"><input type="checkbox" data-set="autoDict"${s.autoDict ? " checked" : ""}> ${esc(t("set.autoDict"))}</label>
     </section>
 
     <section class="pp-sec">
-      <h3 class="pp-h">Чтение</h3>
-      <div class="pp-sec-h"><label class="pp-label" for="set-size">Размер текста</label><span class="pp-note" id="size-out">${s.size} px</span></div>
+      <h3 class="pp-h">${esc(t("set.reviewTitle"))}</h3>
+      <label class="pp-label" for="set-review-new">${esc(t("set.reviewNew"))}</label>
+      <select class="pp-input" id="set-review-new" data-set="reviewNew">${REVIEW_NEW_OPTIONS.map(
+        (n) => `<option value="${n}"${s.reviewNew === n ? " selected" : ""}>${n}</option>`
+      ).join("")}</select>
+      <p class="pp-note pp-mt">${esc(t("set.reviewNote"))}</p>
+    </section>
+
+    <section class="pp-sec">
+      <h3 class="pp-h">${esc(t("set.readingTitle"))}</h3>
+      <div class="pp-sec-h"><label class="pp-label" for="set-size">${esc(t("set.size"))}</label><span class="pp-note" id="size-out">${s.size} px</span></div>
       <input type="range" id="set-size" min="16" max="30" step="1" value="${s.size}" data-set="size" class="pp-range">
-      <p class="pp-label">Тема</p>
-      ${seg("theme", [["light", "Светлая"], ["dark", "Тёмная"]])}
-      <p class="pp-label">Подсветка слов</p>
-      ${seg("highlight", [["all", "Все слова"], ["unlearned", "Неизученные"], ["none", "Выключить"]])}
-      <p class="pp-note pp-mt">Чем ярче слово, тем хуже вы его знаете. Уровень 5 горит сильнее всего, уровень 1 не подсвечивается.</p>
+      <p class="pp-label">${esc(t("set.theme"))}</p>
+      ${seg("theme", [["light", t("theme.light")], ["dark", t("theme.dark")]])}
+      <p class="pp-label">${esc(t("set.highlight"))}</p>
+      ${seg("highlight", [["all", t("hl.allBtn")], ["unlearned", t("hl.unlearnedBtn")], ["none", t("hl.noneBtn")]])}
+      <p class="pp-note pp-mt">${esc(t("set.highlightNote"))}</p>
     </section>
 
     <section class="pp-sec">
-      <h3 class="pp-h">Главы</h3>
+      <h3 class="pp-h">${esc(t("chapters.title"))}</h3>
       ${
         S.chapters.length
           ? S.chapters
               .map(
-                (c) => `<div class="pp-ch-row"><span>${esc(c.title)}${S.chapter?.id === c.id ? ` <em>открыта</em>` : ""}</span>
-                <span class="pp-row"><button class="pp-icon-btn sm" data-act="rename-chapter" data-id="${esc(c.id)}" title="Переименовать" aria-label="Переименовать главу">${I.edit}</button>
-                <button class="pp-icon-btn sm" data-act="delete-chapter" data-id="${esc(c.id)}" title="Удалить" aria-label="Удалить главу">${I.trash}</button></span></div>`
+                (c) => `<div class="pp-ch-row"><span><span class="pp-lang-tag" title="${esc(langName(c.lang))}">${esc(langCode(c.lang))}</span> ${esc(c.title)}${S.chapter?.id === c.id ? ` <em>${esc(t("chapters.open"))}</em>` : ""}</span>
+                <span class="pp-row"><button class="pp-icon-btn sm" data-act="rename-chapter" data-id="${esc(c.id)}" title="${esc(t("chapters.rename"))}" aria-label="${esc(t("chapters.rename"))}">${I.edit}</button>
+                <button class="pp-icon-btn sm" data-act="delete-chapter" data-id="${esc(c.id)}" title="${esc(t("chapters.delete"))}" aria-label="${esc(t("chapters.delete"))}">${I.trash}</button></span></div>`
               )
               .join("")
-          : `<p class="pp-note">Глав пока нет.</p>`
+          : `<p class="pp-note">${esc(t("prog.noChapters"))}</p>`
       }
     </section>
 
     <section class="pp-sec">
-      <h3 class="pp-h">Резервная копия</h3>
-      <p class="pp-note">Бесплатный Supabase не делает резервных копий. Иногда скачивайте файл со всеми главами, словами и карточками.</p>
-      <div class="pp-row"><button class="pp-soft-btn" data-act="export">Скачать копию</button><button class="pp-soft-btn" data-act="import">Загрузить копию</button></div>
+      <h3 class="pp-h">${esc(t("backup.title"))}</h3>
+      <p class="pp-note">${esc(t("backup.note"))}</p>
+      <div class="pp-row"><button class="pp-soft-btn" data-act="export">${esc(t("backup.export"))}</button><button class="pp-soft-btn" data-act="import">${esc(t("backup.import"))}</button></div>
       <input type="file" id="import-file" accept="application/json,.json" hidden>
     </section>
 
     <section class="pp-sec">
-      <h3 class="pp-h">Аккаунт</h3>
-      <p>${esc(S.email || "Вы вошли")}</p>
-      <button class="pp-soft-btn pp-mt" data-act="logout">Выйти</button>
+      <h3 class="pp-h">${esc(t("account.title"))}</h3>
+      <p>${esc(S.email || t("account.signedIn"))}</p>
+      <button class="pp-soft-btn pp-mt" data-act="logout">${esc(t("account.logout"))}</button>
     </section>`;
 }
 
 function saveKey() {
   const input = $("#api-key");
   const v = (input?.value || "").trim();
-  if (!v || v.startsWith("••••")) return toast("Вставьте ключ целиком");
-  if (!v.startsWith("sk-ant-") && !confirm("Ключ Anthropic обычно начинается с sk-ant-. Всё равно сохранить?")) return;
+  if (!v || v.startsWith("••••")) return toast(t("key.pasteWhole"));
+  if (!v.startsWith("sk-ant-") && !confirm(t("key.confirmOdd"))) return;
   localStorage.setItem(LS.api, v);
   renderSettings();
-  toast("Ключ сохранён в этом браузере");
+  toast(t("key.savedToast"));
   updateChapterStats();
   if (S.st && S.settings.autoDict) prepareDictionary();
 }
 
 async function checkKeyAction() {
   const st = $("#key-status");
-  if (st) st.textContent = "Проверяю ключ…";
+  if (st) st.textContent = t("key.checking");
   try {
     await checkKey(apiKey());
-    if (st) st.textContent = "Ключ работает.";
+    if (st) st.textContent = t("key.works");
   } catch (e) {
     if (st) st.textContent = e.message;
   }
@@ -1699,7 +2272,7 @@ async function checkKeyAction() {
 
 async function exportBackup() {
   try {
-    toast("Готовлю резервную копию…");
+    toast(t("backup.preparing"));
     const data = await S.db.exportAll();
     const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
     const a = document.createElement("a");
@@ -1709,9 +2282,9 @@ async function exportBackup() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    toast("Копия скачана");
+    toast(t("backup.done"));
   } catch (e) {
-    toast(`Копия не создалась: ${e.message}`);
+    toast(t("backup.failed", { msg: e.message }));
   }
 }
 
@@ -1719,17 +2292,21 @@ async function importBackup(file) {
   if (!file) return;
   try {
     const data = JSON.parse(await file.text());
-    if (data.app !== "palabra-por-palabra") throw new Error("это не файл копии Palabra por palabra");
+    if (data.app !== "palabra-por-palabra") throw new Error(t("backup.notOurs"));
     const ok = confirm(
-      `Загрузить копию от ${String(data.exported_at || "").slice(0, 10)}? Глав: ${data.chapters?.length || 0}, слов: ${data.words?.length || 0}. Совпадающие главы и слова заменятся данными из файла.`
+      t("backup.confirmImport", {
+        date: String(data.exported_at || "").slice(0, 10),
+        chapters: data.chapters?.length || 0,
+        words: data.words?.length || 0,
+      })
     );
     if (!ok) return;
-    toast("Загружаю копию…", 10000);
+    toast(t("backup.importing"), 10000);
     await S.db.importAll(data);
-    toast("Копия загружена, обновляю страницу");
+    toast(t("backup.imported"));
     setTimeout(() => location.reload(), 900);
   } catch (e) {
-    toast(`Копия не загрузилась: ${e.message}`);
+    toast(t("backup.importFailed", { msg: e.message }));
   }
 }
 
