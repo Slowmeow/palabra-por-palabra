@@ -266,11 +266,17 @@ function renderSetup(err = "") {
   });
 }
 
-function loginError(er) {
+// Returns the message to show, or "" when there is nothing to report (the user closed the Google window).
+function loginError(er, method = "password") {
   const code = String(er?.code || "");
   const m = String(er?.message || er);
+  if (/popup-closed-by-user|cancelled-popup-request|user-cancelled/.test(code)) return "";
+  if (code.includes("popup-blocked")) return t("login.popupBlocked");
+  if (code.includes("unauthorized-domain")) return t("login.unauthorizedDomain", { domain: location.hostname });
+  if (code.includes("admin-restricted-operation")) return t("login.signupDisabled");
+  if (code.includes("account-exists-with-different-credential")) return t("login.otherMethod");
   if (/invalid login/i.test(m)) return t("login.invalid");
-  if (code.includes("operation-not-allowed")) return t("login.notEnabled");
+  if (code.includes("operation-not-allowed")) return t(method === "google" ? "login.googleNotEnabled" : "login.notEnabled");
   if (code.includes("api-key") || code.includes("invalid-api-key")) return t("login.badConfig");
   if (code.includes("too-many-requests")) return t("login.tooMany");
   if (code.includes("network-request-failed")) return t("login.network");
@@ -283,6 +289,8 @@ function renderLogin(err = "") {
     <h1 class="pp-auth-h">${esc(t("login.title"))}</h1>
     <p class="pp-lead">${esc(t("login.lead"))}</p>
     ${err ? `<p class="pp-error-line">${esc(err)}</p>` : ""}
+    <button class="pp-google" type="button" id="li-google">${I.google}<span>${esc(t("login.google"))}</span></button>
+    <div class="pp-or"><span>${esc(t("login.or"))}</span></div>
     <form id="login-form" class="pp-form-plain">
       <label class="pp-label" for="li-email">${esc(t("login.email"))}</label>
       <input class="pp-input" id="li-email" type="email" required autocomplete="username">
@@ -301,6 +309,18 @@ function renderLogin(err = "") {
       await startApp();
     } catch (er) {
       renderLogin(loginError(er));
+    }
+  });
+  $("#li-google").addEventListener("click", async () => {
+    const btn = $("#li-google");
+    btn.disabled = true;
+    try {
+      await S.db.signInWithGoogle();
+      await startApp();
+    } catch (er) {
+      const msg = loginError(er, "google");
+      if (msg) renderLogin(msg);
+      else btn.disabled = false;
     }
   });
 }

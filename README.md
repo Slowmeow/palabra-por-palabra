@@ -2,7 +2,7 @@
 
 A personal reader for learning languages word by word. Paste a chapter in Spanish, French, Japanese, German or any other language: every word becomes clickable and gets its own knowledge level from 5 (don't know) to 1 (know). Claude writes the translation, pronunciation, origin, history, a fact and an explanation of why the word is used in that exact place. Words you are learning go into spaced-repetition review. Everything is stored in your own Firebase project.
 
-The site is plain files with no build step. Hosting: GitHub Pages. Database and sign-in: Firebase (free Spark plan). Claude requests are paid separately through the API.
+The site is plain files with no build step. Hosting: GitHub Pages. Database and sign-in (Google account or email): Firebase (free Spark plan). Claude requests are paid separately through the API.
 
 Live site: **https://slowmeow.github.io/palabra-por-palabra/**
 
@@ -40,12 +40,16 @@ You don't have to edit any files: the site asks for the Firebase config itself a
 2. **Create a project**. Any name, for example `palabra`. Google Analytics isn't needed, you can turn it off.
 3. You stay on the free **Spark** plan; no card is required.
 
-### 2. Turn on sign-in and add yourself
+### 2. Turn on sign-in
 
-1. **Build** → **Authentication** → **Get started**.
-2. **Sign-in method** → **Email/Password** → enable the first switch → **Save**.
-3. **Users** → **Add user**: your email and a password. This is the account you'll sign in with.
-4. Recommended: **Settings** → **User actions** → untick **Enable create (sign-up)**, so nobody else can register in your project. Even without this, other people could only ever see their own empty data.
+The site offers **Continue with Google** and, as a fallback, email and password.
+
+1. **Security** → **Authentication** → **Get started** (in older consoles: **Build** → **Authentication**).
+2. **Sign-in method** → **Add new provider** → **Google** → enable, pick your email as the support email → **Save**.
+3. Optionally also **Email/Password** → enable only the first switch (not "Email link") → **Save**, then **Users** → **Add user** with your email and a password.
+4. **Settings** → **Authorized domains** → **Add domain** → `slowmeow.github.io` (or your own `<username>.github.io`). Without it Google sign-in is refused on the site.
+
+Leave **Settings** → **User actions** → **Enable create (sign-up)** turned on: the first Google sign-in creates your account. Other people who sign in only ever get their own empty folder. To make the database yours alone, use the stricter rules below with your email in step 3.
 
 ### 3. Create the database and its rules
 
@@ -55,12 +59,19 @@ You don't have to edit any files: the site asks for the Firebase config itself a
 
 The rules let each signed-in user read and write only their own folder `users/{uid}`. Without them the site shows "Firestore refused access".
 
+Stricter, only you: replace the `allow` line with this one, putting in the email of your Google account (do it in the console only, so your email doesn't end up in the public repository):
+
+```
+allow read, write: if request.auth != null && request.auth.uid == uid
+                   && request.auth.token.email == "you@gmail.com";
+```
+
 ### 4. Get the config for the site
 
 1. Press the gear next to **Project Overview** → **Project settings** → **General**.
 2. Under **Your apps** press the **Web** button (`</>`), give the app any name, leave Firebase Hosting off, **Register app**.
 3. Copy the whole `firebaseConfig = { … }` snippet.
-4. Open the site and paste it on the first screen, then sign in with the email and password from step 2.
+4. Open the site and paste it on the first screen, then press **Continue with Google** (or sign in with the email and password from step 2).
 
 These values are safe in a public repository and on the site: they only identify the project. Your data is protected by your password and the rules. To skip the first screen on every device, put `apiKey`, `authDomain`, `projectId` and `appId` into `config.js`.
 
@@ -127,7 +138,7 @@ Every couple of weeks open Settings and press "Download backup": you get one JSO
 
 ## Security
 
-- Data is protected by email-and-password sign-in and by the Firestore rules: each user sees only their own folder.
+- Data is protected by Google or email sign-in and by the Firestore rules: each user sees only their own folder.
 - The Anthropic key lives in your browser's `localStorage` and goes straight to Anthropic. That's fine for a personal site, but don't open the site on someone else's computer and don't paste the key where you can't remove it. If the key leaks, revoke it in the Anthropic Console with one click.
 - The Firebase web config is public by design. Never publish a service account key: it bypasses all rules.
 

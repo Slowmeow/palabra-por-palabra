@@ -132,6 +132,15 @@ export function makeDb(config) {
         uid = cred.user.uid;
         return cred.user;
       }),
+    // A popup, not a redirect: redirects break on GitHub Pages because the auth domain is a different site.
+    signInWithGoogle: () =>
+      call(async () => {
+        const provider = new Au.GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: "select_account" });
+        const cred = await Au.signInWithPopup(auth, provider);
+        uid = cred.user.uid;
+        return cred.user;
+      }),
     async signOut() {
       await Au.signOut(auth);
       uid = null;
