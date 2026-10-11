@@ -790,6 +790,15 @@ a.pp-primary { text-decoration: none; }
   .pp-ch-grid { grid-template-columns: 1fr; }
 }
 
+/* ---------- Importing a book ---------- */
+
+.pp-import-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; padding-top: 12px; border-top: 1px dashed var(--line2); }
+.pp-imp-list { max-height: 46vh; overflow-y: auto; margin: 4px 0 6px; border: 1px solid var(--line); border-radius: 12px; padding: 4px 12px; }
+.pp-imp-list li { border-bottom: 1px solid var(--line); }
+.pp-imp-list li:last-child { border-bottom: 0; }
+.pp-imp-list .pp-check { align-items: baseline; margin: 0; padding: 8px 0; }
+.pp-imp-t { flex: 1; min-width: 0; color: var(--ink); font-family: var(--serif); font-size: 15.5px; overflow-wrap: anywhere; }
+
 /* ---------- Shared library ---------- */
 
 .pp-lib-item {

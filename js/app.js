@@ -80,6 +80,7 @@ const S = {
   vfilter: { q: "", level: 0 },
   renderedWord: null,
   review: null,
+  imp: null, // a book being imported: { book, lang, chapters, first }
   voiceWarned: new Set(),
   isAdmin: false,
   profile: null,
@@ -666,6 +667,14 @@ const ACTIONS = {
   },
   "rename-chapter": (a) => renameChapter(a.dataset.id),
   "chapter-book": (a) => moveToBook(a.dataset.id),
+  "imp-pick": () => $("#imp-file")?.click(),
+  "imp-go": () => runImport(),
+  "imp-back": () => {
+    const first = S.imp?.first;
+    S.imp = null;
+    const box = $("#add-form");
+    if (box) box.outerHTML = addFormHTML(first);
+  },
   "home-lang": (a) => {
     S.homeLang = a.dataset.val;
     renderHome();
@@ -769,6 +778,17 @@ function onChange(e) {
     return renderPanel();
   }
   if (tg.id === "import-file") return void importBackup(tg.files?.[0]);
+  if (tg.id === "imp-file") return void importFile(tg.files?.[0]);
+  if (tg.dataset.imp != null && S.imp) {
+    S.imp.chapters[Number(tg.dataset.imp)].on = tg.checked;
+    const n = S.imp.chapters.filter((c) => c.on).length;
+    const go = $("#imp-go");
+    if (go) {
+      go.disabled = !n;
+      go.textContent = t("imp.go", { n });
+    }
+    return;
+  }
   const k = tg.dataset.set;
   if (!k) return;
   let val = tg.type === "checkbox" ? tg.checked : tg.type === "range" ? Number(tg.value) : tg.value;
@@ -1311,7 +1331,7 @@ function langOptions(list, selected, withOther) {
 }
 
 function addFormHTML(first) {
-  return `<div class="pp-form">
+  return `<div class="pp-form" id="add-form">
     <div class="pp-form-grid">
       <div><label class="pp-label" for="add-lang">${esc(t("add.lang"))}</label>
         <select class="pp-input" id="add-lang">${langOptions(STUDY_LANGS, S.lang, true)}</select></div>
@@ -1324,6 +1344,11 @@ function addFormHTML(first) {
     <label class="pp-label" for="add-text">${esc(t("add.text"))}</label>
     <textarea class="pp-textarea" id="add-text" lang="${esc(S.lang)}" placeholder="${esc(t("add.textPlaceholder"))}"></textarea>
     <label class="pp-check"><input type="checkbox" id="add-join" checked> ${esc(t("add.join"))}</label>
+    <div class="pp-import-row">
+      <span class="pp-note">${esc(t("imp.or"))}</span>
+      <button class="pp-soft-btn" data-act="imp-pick">${I.book} ${esc(t("imp.button"))}</button>
+      <input type="file" id="imp-file" accept=".epub,.txt,application/epub+zip,text/plain" hidden>
+    </div>
     <div class="pp-form-foot">
       <p class="pp-note" id="add-preview">${esc(t("add.previewEmpty"))}</p>
       <div class="pp-row">
@@ -1392,24 +1417,172 @@ async function submitChapter() {
     const heading = isChapterHeading(paragraphs[0]) ? paragraphs[0] : "";
     const sameLang = S.chapters.filter((c) => c.lang === lang).length;
     const title = (($("#add-title")?.value || "").trim() || heading || t("add.defaultTitle", { n: sameLang + 1 })).slice(0, 120);
-    const position = S.chapters.reduce((m, c) => Math.max(m, c.position || 0), 0) + 1;
     const book = ($("#add-book")?.value || "").trim().slice(0, 120);
-    const st = buildStructure(paragraphs, lang);
-    const ch = await S.db.addChapter(title, paragraphs, position, lang, book, st.firstOcc.size);
-    ch.lang = ch.lang || lang;
-    const known = wordsOf(lang);
-    const fresh = [...st.firstOcc.keys()].filter((w) => !known.has(w));
-    await S.db.registerWords(fresh, ch.id, lang);
-    for (const w of fresh) setRow({ ...blankRow(w, lang), first_chapter: ch.id });
-    S.chapters.push(ch);
-    S.chapterWords.set(ch.id, new Set(st.firstOcc.keys()));
+    const { ch, unique, fresh } = await createChapter({ title, paragraphs, lang, book });
     closeModal();
     goChapter(ch.id);
-    toast(t("add.done", { unique: st.firstOcc.size, fresh: fresh.length }));
+    toast(t("add.done", { unique, fresh }));
   } catch (e) {
     toast(t("add.failed", { msg: e.message }));
     btn.disabled = false;
     btn.textContent = t("add.submit");
+  }
+}
+
+/* ---------------- Importing a book from a file ---------------- */
+
+const IMPORT_MAX_BYTES = 25 * 1024 * 1024;
+const IMPORT_MAX_CHAPTERS = 200;
+const PART_WORDS = 3000; // plain text without headings is cut into parts of about this size
+const CHAPTER_MAX_CHARS = 600000; // keeps every chapter document well under Firestore's 1 MiB limit
+
+// Adds one chapter and registers its new words. Shared by the form and the importer.
+async function createChapter({ title, paragraphs, lang, book }) {
+  const position = S.chapters.reduce((m, c) => Math.max(m, c.position || 0), 0) + 1;
+  const st = buildStructure(paragraphs, lang);
+  const ch = await S.db.addChapter(title.slice(0, 120), paragraphs, position, lang, book, st.firstOcc.size);
+  ch.lang = ch.lang || lang;
+  const known = wordsOf(lang);
+  const fresh = [...st.firstOcc.keys()].filter((w) => !known.has(w));
+  await S.db.registerWords(fresh, ch.id, lang);
+  for (const w of fresh) setRow({ ...blankRow(w, lang), first_chapter: ch.id });
+  S.chapters.push(ch);
+  S.chapterWords.set(ch.id, new Set(st.firstOcc.keys()));
+  return { ch, unique: st.firstOcc.size, fresh: fresh.length };
+}
+
+const countWords = (paragraphs, lang) =>
+  langInfo(lang).noSpace ? Math.round(paragraphs.join("").length / 2) : paragraphs.join(" ").split(/\s+/).filter(Boolean).length;
+
+// Very long chapters are cut at paragraph boundaries.
+function splitLong(paragraphs, maxChars, maxWords, lang) {
+  const parts = [];
+  let cur = [];
+  let chars = 0;
+  for (const p of paragraphs) {
+    const tooBig = chars + p.length > maxChars || (maxWords && countWords([...cur, p], lang) > maxWords);
+    if (cur.length && tooBig) {
+      parts.push(cur);
+      cur = [];
+      chars = 0;
+    }
+    cur.push(p);
+    chars += p.length;
+  }
+  if (cur.length) parts.push(cur);
+  return parts;
+}
+
+// The book's own language code, if the site knows it; otherwise the language chosen in the form.
+function bookLang(code, fallback) {
+  const base = String(code || "").split("-")[0].toLowerCase();
+  if (STUDY_LANGS.includes(base)) return base;
+  return code && isLangTag(code) ? canonLang(code) : fallback;
+}
+
+async function importFile(file) {
+  if (!file) return;
+  const out = $("#add-preview");
+  if (file.size > IMPORT_MAX_BYTES) return toast(t("imp.tooBig"));
+  if (out) out.textContent = t("imp.reading");
+  try {
+    const { parseEpub, decodeText, splitText } = await import("./importer.js");
+    const buf = await file.arrayBuffer();
+    const formLang = addLang();
+    const join = $("#add-join")?.checked ?? true;
+    let book;
+    let lang;
+    let chapters;
+    if (/\.epub$/i.test(file.name) || file.type === "application/epub+zip") {
+      const epub = await parseEpub(buf);
+      lang = bookLang(epub.lang, formLang);
+      book = epub.title || file.name.replace(/\.epub$/i, "");
+      chapters = epub.chapters;
+    } else {
+      lang = formLang;
+      book = file.name.replace(/\.[^.]+$/, "");
+      chapters = splitText(decodeText(buf)).map((c) => ({ title: c.title, paragraphs: reflowText(c.text, join, lang) }));
+      // No headings at all: cut a long text into parts so each stays readable.
+      if (chapters.length === 1) {
+        chapters = splitLong(chapters[0].paragraphs, CHAPTER_MAX_CHARS, PART_WORDS, lang).map((paragraphs) => ({ title: "", paragraphs }));
+      }
+    }
+    chapters = chapters
+      .filter((c) => c.paragraphs.length)
+      .flatMap((c) => splitLong(c.paragraphs, CHAPTER_MAX_CHARS, 0, lang).map((paragraphs, i) => ({ title: i ? `${c.title} (${i + 1})` : c.title, paragraphs })))
+      .slice(0, IMPORT_MAX_CHAPTERS)
+      .map((c) => {
+        const words = countWords(c.paragraphs, lang);
+        // Covers, copyright pages and tables of contents are short: unticked by default.
+        return { ...c, words, on: words >= 40 };
+      });
+    if (!chapters.length) throw new Error(t("imp.none"));
+    S.imp = { book: book.slice(0, 120), lang, chapters, first: !$("#modal-root .pp-modal") };
+    renderImport();
+  } catch (e) {
+    const msg = e.message === "not-epub" ? t("imp.notEpub") : e.message;
+    if (out) out.textContent = t("imp.failed", { msg });
+    else toast(t("imp.failed", { msg }));
+  }
+}
+
+function renderImport() {
+  const box = $("#add-form");
+  const imp = S.imp;
+  if (!box || !imp) return;
+  const n = imp.chapters.filter((c) => c.on).length;
+  box.innerHTML = `
+    <div class="pp-form-grid">
+      <div><label class="pp-label" for="imp-lang">${esc(t("imp.lang"))}</label>
+        <select class="pp-input" id="imp-lang">${langOptions(STUDY_LANGS, imp.lang, false)}</select></div>
+      <div><label class="pp-label" for="imp-book">${esc(t("imp.book"))}</label>
+        <input class="pp-input" id="imp-book" maxlength="120" value="${esc(imp.book)}"></div>
+    </div>
+    <p class="pp-note">${esc(t("imp.found", { n: imp.chapters.length }))}</p>
+    <ul class="pp-imp-list">${imp.chapters
+      .map(
+        (c, i) => `<li><label class="pp-check"><input type="checkbox" data-imp="${i}"${c.on ? " checked" : ""}>
+          <span class="pp-imp-t" ${readerLangAttrs(imp.lang)}>${esc(c.title || t("imp.untitled", { n: i + 1 }))}</span>
+          <span class="pp-note">${esc(t("imp.words", { n: c.words }))}</span></label></li>`
+      )
+      .join("")}</ul>
+    <div class="pp-form-foot">
+      <p class="pp-note" id="imp-progress"></p>
+      <div class="pp-row">
+        <button class="pp-soft-btn" data-act="imp-back">${esc(t("imp.back"))}</button>
+        <button class="pp-primary" data-act="imp-go" id="imp-go"${n ? "" : " disabled"}>${esc(t("imp.go", { n }))}</button>
+      </div>
+    </div>`;
+}
+
+async function runImport() {
+  const imp = S.imp;
+  if (!imp || imp.running) return;
+  const lang = $("#imp-lang")?.value || imp.lang;
+  const book = ($("#imp-book")?.value || "").trim().slice(0, 120);
+  const todo = imp.chapters.filter((c) => c.on);
+  if (!todo.length) return;
+  imp.running = true;
+  $$("#add-form button, #add-form input, #add-form select").forEach((el) => (el.disabled = true));
+  const progress = $("#imp-progress");
+  let done = 0;
+  try {
+    for (const c of todo) {
+      if (progress) progress.textContent = t("imp.progress", { i: done + 1, n: todo.length });
+      const sameLang = S.chapters.filter((x) => x.lang === lang).length;
+      await createChapter({ title: c.title || t("add.defaultTitle", { n: sameLang + 1 }), paragraphs: c.paragraphs, lang, book });
+      done++;
+    }
+    S.imp = null;
+    closeModal();
+    S.homeLang = "";
+    goHome();
+    toast(t("imp.done", { n: done }));
+  } catch (e) {
+    imp.running = false;
+    toast(t("imp.stopped", { n: done, msg: e.message }), 7000);
+    if (S.view === "home") renderHome();
+    renderImport();
   }
 }
 
