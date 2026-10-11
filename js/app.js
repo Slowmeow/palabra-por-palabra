@@ -81,6 +81,7 @@ const S = {
   renderedWord: null,
   review: null,
   imp: null, // a book being imported: { book, lang, chapters, first }
+  installPrompt: null, // the browser's install offer, when there is one
   voiceWarned: new Set(),
   isAdmin: false,
   profile: null,
@@ -292,6 +293,22 @@ function ttsStop() {
 }
 
 /* ---------------- Boot, connection, sign-in ---------------- */
+
+// Installable app and offline reading: the worker caches the site's files (see sw.js).
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+// Chrome and Android offer installation through this event; Settings shows the button while it's available.
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  S.installPrompt = e;
+  if (S.panel.open && S.panel.mode === "settings") renderSettings();
+});
+window.addEventListener("appinstalled", () => {
+  S.installPrompt = null;
+  if (S.panel.open && S.panel.mode === "settings") renderSettings();
+});
+const isStandalone = () => window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
 
 export async function boot() {
   applyUiLang(localStorage.getItem(LS.ui) || DEFAULTS.uiLang);
@@ -668,6 +685,14 @@ const ACTIONS = {
   "rename-chapter": (a) => renameChapter(a.dataset.id),
   "chapter-book": (a) => moveToBook(a.dataset.id),
   "imp-pick": () => $("#imp-file")?.click(),
+  "install-app": async () => {
+    const offer = S.installPrompt;
+    if (!offer) return;
+    offer.prompt();
+    await offer.userChoice.catch(() => null);
+    S.installPrompt = null;
+    renderSettings();
+  },
   "imp-go": () => runImport(),
   "imp-back": () => {
     const first = S.imp?.first;
@@ -3071,6 +3096,17 @@ function renderSettings() {
       <label class="pp-label" for="set-xl">${esc(t("set.explainLang"))}</label>
       <select class="pp-input" id="set-xl" data-set="explainLang">${langOptions(EXPLAIN_LANGS, s.explainLang, true)}</select>
       <p class="pp-note pp-mt">${esc(t("set.explainNote"))}</p>
+    </section>
+
+    <section class="pp-sec">
+      <h3 class="pp-h">${esc(t("app.title"))}</h3>
+      ${
+        isStandalone()
+          ? `<p class="pp-note">${esc(t("app.installed"))}</p>`
+          : S.installPrompt
+            ? `<button class="pp-primary" data-act="install-app">${I.plus} ${esc(t("app.install"))}</button><p class="pp-note pp-mt">${esc(t("app.note"))}</p>`
+            : `<p class="pp-note">${esc(t("app.howTo"))}</p><p class="pp-note pp-mt">${esc(t("app.note"))}</p>`
+      }
     </section>
 
     <section class="pp-sec">

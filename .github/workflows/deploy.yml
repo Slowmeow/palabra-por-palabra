@@ -29,7 +29,9 @@ jobs:
       - name: Collect the site files
         run: |
           mkdir _site
-          cp -r index.html config.js styles.css js _site/
+          cp -r index.html config.js styles.css sw.js manifest.webmanifest icons js _site/
+          # A new cache name per release makes installed apps drop old files.
+          sed -i "s/__BUILD__/${GITHUB_SHA::12}/" _site/sw.js
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:

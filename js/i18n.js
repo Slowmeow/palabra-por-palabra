@@ -60,6 +60,11 @@ const STR = {
     "api.other": "Claude API error ({status}): {msg}",
     "api.overloaded": "Claude's servers are overloaded right now. Try again a bit later.",
     "api.refusal": "The model declined this request. Try another model.",
+    "app.howTo": "To get an app icon: on iPhone press Share → Add to Home Screen; on Android open the browser menu → Install app; on a computer use the install icon in the address bar.",
+    "app.install": "Install the app",
+    "app.installed": "You're using the installed app.",
+    "app.note": "Chapters and words you have already opened stay readable without the internet. Translations, analyses and sync need a connection.",
+    "app.title": "App",
     "backup.confirmImport":
       "Restore the backup from {date}? Chapters: {chapters}, words: {words}. Matching chapters and words will be replaced with the data from the file.",
     "backup.done": "Backup downloaded",
@@ -510,6 +515,11 @@ const STR = {
     "api.other": "Ошибка Claude API ({status}): {msg}",
     "api.overloaded": "Серверы Claude сейчас перегружены. Повторите чуть позже.",
     "api.refusal": "Модель отказалась отвечать на этот запрос. Попробуйте другую модель.",
+    "app.howTo": "Чтобы получить иконку приложения: на iPhone нажмите «Поделиться» → «На экран Домой»; на Android откройте меню браузера → «Установить приложение»; на компьютере — значок установки в адресной строке.",
+    "app.install": "Установить приложение",
+    "app.installed": "Вы пользуетесь установленным приложением.",
+    "app.note": "Уже открытые главы и слова читаются без интернета. Переводам, разборам и синхронизации нужна связь.",
+    "app.title": "Приложение",
     "backup.confirmImport":
       "Загрузить копию от {date}? Глав: {chapters}, слов: {words}. Совпадающие главы и слова заменятся данными из файла.",
     "backup.done": "Копия скачана",
