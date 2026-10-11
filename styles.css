@@ -704,6 +704,55 @@ select.pp-input {
 .pp-reader.is-cjk .pp-p { text-align: left; }
 [dir="rtl"].pp-reader .pp-p { text-align: right; }
 
+/* ---------- Shared library ---------- */
+
+.pp-lib-item {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+.pp-lib-item.is-used { border-color: var(--cob-soft); box-shadow: inset 3px 0 0 var(--cob); }
+.pp-lib-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13.5px; }
+.pp-lib-by { font-weight: 700; color: var(--ink); }
+.pp-lib-h .pp-like { margin-left: auto; }
+.pp-lib-tr { margin-top: 6px; font-family: var(--serif); font-size: 17px; color: var(--cob); }
+.pp-lib-preview, .pp-lib-body p { margin-top: 4px; color: var(--ink2); font-size: 14px; }
+.pp-lib-sub { margin: 10px 0 2px; font-size: 12px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; color: var(--ink3); }
+.pp-lib-actions { margin-top: 10px; }
+.pp-lib-src { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--ink2); font-size: 13.5px; }
+.pp-lib-src svg { color: var(--ink3); }
+.pp-lib-src .pp-like { margin-left: auto; }
+
+.pp-like {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line2);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink3);
+  font-size: 12.5px;
+}
+.pp-like b { font-weight: 600; color: var(--ink2); }
+button.pp-like:hover { color: #c2410c; border-color: #e7a37f; }
+.pp-like.on { color: #c2410c; border-color: #e7a37f; background: color-mix(in srgb, #c2410c 8%, var(--card)); }
+.pp-like.on svg { fill: currentColor; }
+.pp-like.is-own { border-style: dashed; }
+.pp-danger { color: #b42318; }
+:root[data-theme="dark"] .pp-danger { color: #f0907f; }
+
+.pp-uid code { font-size: 12px; overflow-wrap: anywhere; background: var(--bg2); padding: 1px 5px; border-radius: 5px; }
+
+/* ---------- Admin panel ---------- */
+
+.pp-adm-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.pp-adm-item:last-child { border-bottom: 0; }
+.pp-adm-h { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pp-adm-plan-row { margin-top: 8px; flex-wrap: nowrap; }
+.pp-adm-plan { width: auto; min-width: 90px; padding-top: 7px; padding-bottom: 7px; }
+.pp-adm-until { width: auto; min-width: 0; flex: 1; padding: 7px 10px; }
+
 /* ---------- Review ---------- */
 
 .pp-rv { width: min(560px, 100%); }

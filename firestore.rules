@@ -1,12 +1,107 @@
 rules_version = '2';
 
 // Paste this into Firebase console → Firestore Database → Rules and press Publish.
-// Every signed-in user can read and write only their own folder, users/{their uid}.
-// Nobody else, signed in or not, can see anything.
+//
+// - users/{uid}: each person's chapters, words, cards and settings. Only that person.
+// - profiles/{uid}: name, email and plan for the admin panel. The plan is changed only by an admin.
+// - admins/{uid}: created by hand in the console. Nobody can create one from the site.
+// - shared_dict, shared_cards, shared_ctx: the shared library. Everyone signed in reads it and adds to it;
+//   existing entries can't be overwritten; only the author or an admin deletes an explanation.
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function me() {
+      return request.auth.uid;
+    }
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    function text(v, max) {
+      return v is string && v.size() <= max;
+    }
+
     match /users/{uid}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, write: if signedIn() && me() == uid;
+    }
+
+    match /profiles/{uid} {
+      allow read: if signedIn() && (me() == uid || isAdmin());
+      allow create: if signedIn() && me() == uid && request.resource.data.plan == "free";
+      allow update: if isAdmin()
+        || (signedIn() && me() == uid
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(["plan", "planUntil"]));
+      allow delete: if isAdmin();
+    }
+
+    match /admins/{uid} {
+      allow read: if signedIn() && me() == uid;
+    }
+
+    // Quick translations: { lang, xl, w: { word: "[...]" } }. Words can be added, never changed or removed.
+    match /shared_dict/{bucket} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(["lang", "xl", "w"])
+        && request.resource.data.w is map
+        && request.resource.data.w.size() <= 400;
+      allow update: if isAdmin()
+        || (signedIn()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["w"])
+            && request.resource.data.w.diff(resource.data.w).changedKeys().size() == 0
+            && request.resource.data.w.diff(resource.data.w).removedKeys().size() == 0
+            && request.resource.data.w.diff(resource.data.w).addedKeys().size() <= 400);
+      allow delete: if isAdmin();
+    }
+
+    // Detailed explanations. Likes are counted with one like document per person.
+    match /shared_cards/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(["lang", "word", "xl", "by", "byName", "model", "created", "likes", "f", "z", "j"])
+        && request.resource.data.by == me()
+        && request.resource.data.likes == 0
+        && text(request.resource.data.lang, 20)
+        && text(request.resource.data.word, 100)
+        && text(request.resource.data.xl, 20)
+        && text(request.resource.data.byName, 100)
+        && (!("z" in request.resource.data) || (request.resource.data.z is bytes && request.resource.data.z.size() <= 16000))
+        && (!("j" in request.resource.data) || text(request.resource.data.j, 24000));
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["likes"])
+        && (
+          (request.resource.data.likes == resource.data.likes + 1
+            && !exists(/databases/$(database)/documents/shared_cards/$(id)/likes/$(request.auth.uid))
+            && existsAfter(/databases/$(database)/documents/shared_cards/$(id)/likes/$(request.auth.uid)))
+          || (request.resource.data.likes == resource.data.likes - 1
+            && exists(/databases/$(database)/documents/shared_cards/$(id)/likes/$(request.auth.uid))
+            && !existsAfter(/databases/$(database)/documents/shared_cards/$(id)/likes/$(request.auth.uid)))
+        );
+      allow delete: if isAdmin() || (signedIn() && resource.data.by == me());
+
+      match /likes/{uid} {
+        allow read: if signedIn() && me() == uid;
+        allow create: if signedIn() && me() == uid
+          && getAfter(/databases/$(database)/documents/shared_cards/$(id)).data.likes
+             == get(/databases/$(database)/documents/shared_cards/$(id)).data.likes + 1;
+        allow delete: if signedIn() && me() == uid
+          && getAfter(/databases/$(database)/documents/shared_cards/$(id)).data.likes
+             == get(/databases/$(database)/documents/shared_cards/$(id)).data.likes - 1;
+      }
+    }
+
+    // "Why this word here" for one exact sentence. Created once, never edited.
+    match /shared_ctx/{key} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(["lang", "xl", "word", "s", "text", "ru", "tr", "by", "created"])
+        && request.resource.data.by == me()
+        && text(request.resource.data.s, 1200)
+        && text(request.resource.data.text, 3000)
+        && text(request.resource.data.ru, 3000)
+        && text(request.resource.data.tr, 300);
+      allow delete: if isAdmin() || (signedIn() && resource.data.by == me());
     }
   }
 }

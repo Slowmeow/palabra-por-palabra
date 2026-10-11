@@ -35,6 +35,8 @@ const DEFAULTS = {
   dictModel: "claude-haiku-5-5",
   autoDict: true,
   reviewNew: 20,
+  share: true, // add my translations and analyses to the shared library
+  liked: [], // ids of shared explanations I liked
   lastChapter: null,
   spent: 0,
 };
@@ -45,6 +47,8 @@ const MOBILE_MAX = 759;
 const DICT_BATCH = 60;
 const REVIEW_MAX_DUE = 200;
 const REVIEW_NEW_OPTIONS = [5, 10, 15, 20, 30, 50, 100];
+const DICT_FLUSH = 5; // save quick translations every 5 batches instead of after each one
+const LIKED_MAX = 1000;
 const FACT_EMOJI = { funny: "😄", sad: "🥀", creepy: "👻", surprising: "✨", historical: "📜" };
 
 const S = {
@@ -76,6 +80,13 @@ const S = {
   renderedWord: null,
   review: null,
   voiceWarned: new Set(),
+  isAdmin: false,
+  profile: null,
+  lib: new Map(), // wkey -> shared explanations of that word (array), or "loading"
+  libOpen: false, // the word panel shows the library list even though a card exists
+  libMore: new Set(), // shared ids expanded in the list
+  sharedCtx: new Map(), // lang|xl|sentence|word -> shared "why here", or null when there is none
+  admin: null, // admin panel data
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -100,6 +111,9 @@ const setRow = (row) => wordsOf(row.lang).set(row.word, row);
 const selLang = () => S.sel?.lang || S.lang;
 const isSelected = (w, lang) => !!S.sel && S.sel.w === w && S.sel.lang === lang && S.panel.open && S.panel.mode === "word";
 const xl = () => S.settings.explainLang;
+const sharing = () => S.settings.share !== false;
+const liked = (id) => (S.settings.liked || []).includes(id);
+const ctxKey = (lang, x, sentence, w) => `${lang}|${x}|${sentence}|${w}`;
 const quickXl = (q) => q?.xl || LEGACY_XL;
 const cardXl = (card) => card?.meta?.xl || LEGACY_XL;
 // A quick translation is missing, or written in another explanation language (and not typed by hand).
@@ -343,6 +357,7 @@ function shellHTML() {
         <button class="pp-icon-btn" data-act="panel" data-mode="vocab" title="${esc(t("panel.vocab"))}" aria-label="${esc(t("panel.vocab"))}">${I.book}<span class="pp-count" id="vocab-count" hidden></span></button>
         <button class="pp-icon-btn" data-act="panel" data-mode="progress" title="${esc(t("panel.progress"))}" aria-label="${esc(t("panel.progress"))}">${I.chart}</button>
         <button class="pp-icon-btn" data-act="panel" data-mode="settings" title="${esc(t("panel.settings"))}" aria-label="${esc(t("panel.settings"))}">${I.gear}</button>
+        <button class="pp-icon-btn" id="admin-btn" data-act="panel" data-mode="admin" title="${esc(t("panel.admin"))}" aria-label="${esc(t("panel.admin"))}"${S.isAdmin ? "" : " hidden"}>${I.shield}</button>
       </div>
     </header>
     <main id="main"></main>
@@ -387,12 +402,15 @@ async function startApp() {
   $("#app").innerHTML = shellHTML();
   setMain(loadingHTML("boot.loading"));
   try {
-    const [chapters, words, saved, email] = await Promise.all([
+    const [chapters, words, saved, email, role] = await Promise.all([
       S.db.listChapters(),
       S.db.loadWords(),
       S.db.loadSettings(),
       S.db.userEmail().catch(() => ""),
+      S.db.loadRole().catch(() => ({ profile: null, admin: false })),
     ]);
+    S.isAdmin = role.admin;
+    S.profile = role.profile;
     S.chapters = chapters.map((c) => ({ ...c, lang: c.lang || "es" }));
     S.vocab = new Map();
     for (const r of words) setRow({ ...r, lang: r.lang || "es" });
@@ -403,6 +421,9 @@ async function startApp() {
       applyUiLang(S.settings.uiLang);
       $("#app").innerHTML = shellHTML();
     }
+    $("#admin-btn").hidden = !S.isAdmin;
+    // Keeps the admin's list of users current; never blocks the app.
+    S.db.saveProfile({ words: words.length, cards: words.filter((r) => r.has_card).length }).catch(() => {});
     const target = S.chapters.find((c) => c.id === S.settings.lastChapter) || S.chapters.at(-1);
     S.lang = target?.lang || S.settings.studyLang || "es";
     applyReaderSettings();
@@ -563,6 +584,33 @@ const ACTIONS = {
     renderReview();
   },
   "rv-close": () => closeModal(),
+  // Shared library
+  "lib-use": (a) => useShared(a.dataset.id),
+  "lib-like": (a) => toggleLike(a.dataset.id),
+  "lib-more": (a) => {
+    const id = a.dataset.id;
+    if (S.libMore.has(id)) S.libMore.delete(id);
+    else S.libMore.add(id);
+    renderWordView();
+  },
+  "lib-open": () => {
+    S.libOpen = true;
+    if (S.sel) loadLibrary(S.sel.w, S.sel.lang, true);
+    renderWordView();
+  },
+  "lib-close": () => {
+    S.libOpen = false;
+    renderWordView();
+  },
+  "lib-delete": (a) => deleteShared(a.dataset.id),
+  "copy-uid": () => {
+    const uid = S.db?.userInfo().uid || "";
+    navigator.clipboard?.writeText(uid).then(() => toast(t("account.uidCopied")), () => prompt(t("account.uid"), uid));
+  },
+  // Admin panel
+  "admin-refresh": () => loadAdmin(true),
+  "admin-plan": (a) => savePlan(a.dataset.uid),
+  "admin-delete": (a) => deleteShared(a.dataset.id),
 };
 
 function onClick(e) {
@@ -633,7 +681,7 @@ function onChange(e) {
   if (k === "explainLang") {
     updateChapterStats();
     if (S.sel) patchQuick(S.sel.w, S.sel.lang);
-    if (S.settings.autoDict && apiKey()) prepareDictionary();
+    if (S.settings.autoDict || !apiKey()) prepareDictionary();
   }
   if (["cardModel", "cardEffort", "dictModel", "showThinking", "haikuThinking", "explainLang"].includes(k)) renderSettings();
 }
@@ -774,7 +822,7 @@ async function openChapter(id) {
       if (S.panel.open) renderPanel();
     }
     window.scrollTo(0, 0);
-    if (S.settings.autoDict && apiKey()) prepareDictionary();
+    if (S.settings.autoDict || !apiKey()) prepareDictionary();
   } catch (e) {
     setMain(`<div class="pp-empty"><div class="pp-empty-in"><h1 class="pp-hero">${esc(t("reader.openFailed"))}</h1><p class="pp-lead">${esc(e.message)}</p></div></div>`);
   }
@@ -1045,7 +1093,7 @@ async function deleteChapter(id) {
 
 /* ---------------- Panel ---------------- */
 
-const PANEL_TITLES = { word: "panel.word", vocab: "panel.vocab", progress: "panel.progress", settings: "panel.settings" };
+const PANEL_TITLES = { word: "panel.word", vocab: "panel.vocab", progress: "panel.progress", settings: "panel.settings", admin: "panel.admin" };
 
 function openPanel(mode) {
   S.panel = { open: true, mode };
@@ -1086,6 +1134,7 @@ function renderPanel() {
   else if (S.panel.mode === "vocab") renderVocab();
   else if (S.panel.mode === "progress") renderProgress();
   else if (S.panel.mode === "settings") renderSettings();
+  else if (S.panel.mode === "admin") renderAdmin();
 }
 
 // Languages that have chapters or words: the vocabulary and progress panels can switch between them.
@@ -1119,13 +1168,14 @@ function selectWord(w, sid, ti) {
   const tok = S.st?.sentTokens[sid]?.[ti];
   if (!tok) return;
   const lang = S.chapter.lang;
+  if (S.sel?.w !== w || S.sel?.lang !== lang) resetLibraryView();
   S.sel = { w, lang, sid, ti, surface: tok.t };
   S.editing = false;
   S.regenOpen = false;
   S.ctxErr = null;
   openPanel("word");
   ensureQuick(w, false, lang);
-  ensureFull(w, lang);
+  ensureFull(w, lang).then(() => afterWordLoaded(w, lang));
   const row = rowOf(w, lang);
   if (S.settings.autoCard && apiKey() && !row.has_card && row.level > 1 && !S.gen.has(wkey(lang, w))) generateForSelected();
 }
@@ -1137,12 +1187,142 @@ function openWordFromList(w, lang = S.lang) {
     requestAnimationFrame(() => scrollToToken(first[0], first[1]));
     return;
   }
+  resetLibraryView();
   S.sel = { w, lang, sid: null, ti: null, surface: w };
   S.editing = false;
   S.regenOpen = false;
   openPanel("word");
   ensureQuick(w, false, lang);
-  ensureFull(w, lang);
+  ensureFull(w, lang).then(() => afterWordLoaded(w, lang));
+}
+
+/* ----- Shared library ----- */
+
+function resetLibraryView() {
+  S.libOpen = false;
+  S.libMore.clear();
+}
+
+// Once the word's own data is in: look for other learners' explanations if there is no card,
+// and for a shared "why this word here" if this sentence has none.
+function afterWordLoaded(w, lang) {
+  if (!isSelected(w, lang)) return;
+  const full = S.full.get(wkey(lang, w));
+  if (!full?.card) loadLibrary(w, lang);
+  if (S.sel.sid != null && S.st) {
+    const sentence = S.st.sentences[S.sel.sid].trim();
+    if (!(full?.contexts || []).some((c) => c.s === sentence && c.text)) ensureSharedCtx(w, lang, sentence);
+  }
+}
+
+async function loadLibrary(w, lang, force = false) {
+  const k = wkey(lang, w);
+  if (!force && S.lib.has(k)) return;
+  S.lib.set(k, "loading");
+  try {
+    S.lib.set(k, await S.db.sharedCardsFor(lang, w));
+  } catch {
+    S.lib.set(k, []);
+  }
+  if (isSelected(w, lang) && !S.editing) renderWordView();
+}
+
+async function ensureSharedCtx(w, lang, sentence) {
+  const key = ctxKey(lang, xl(), sentence, w);
+  if (S.sharedCtx.has(key)) return;
+  S.sharedCtx.set(key, null);
+  try {
+    const found = await S.db.getSharedCtx(lang, xl(), sentence, w);
+    S.sharedCtx.set(key, found);
+    if (found && isSelected(w, lang) && !S.editing) renderWordView();
+  } catch {
+    /* the library is a bonus */
+  }
+}
+
+const libItems = (w, lang) => {
+  const v = S.lib.get(wkey(lang, w));
+  return Array.isArray(v) ? v : [];
+};
+
+// Takes someone's explanation: the word's card becomes a pointer to it, not a copy.
+async function useShared(id) {
+  const sel = S.sel;
+  if (!sel) return;
+  const { w, lang } = sel;
+  const k = wkey(lang, w);
+  const item = libItems(w, lang).find((x) => x.id === id) || (await S.db.getSharedCard(id).catch(() => null));
+  if (!item) return toast(t("lib.gone"));
+  const c = item.card || {};
+  const row = rowOf(w, lang);
+  const quick =
+    needsQuick(row) && c.translation
+      ? { translation: c.translation, pronunciation: c.pronunciation || "", reading: c.reading || "", ipa: c.ipa || "", pos: c.pos || "", lemma: c.lemma || "", xl: item.xl }
+      : row.quick;
+  try {
+    await S.db.saveWord({ word: w, lang, card: { ref: id, at: new Date().toISOString() }, quick });
+    const full = S.full.get(k) || { word: w, lang, contexts: [], notes: null };
+    const meta = { ref: id, by: item.by, byName: item.byName, likes: item.likes, model: item.model, xl: item.xl };
+    S.full.set(k, { ...full, card: { ...c, meta }, refMissing: false, quick });
+    setRow({ ...rowOf(w, lang), quick, has_card: true });
+    S.libOpen = false;
+    renderWordView();
+    updateChapterStats();
+    toast(t("lib.used"));
+  } catch (e) {
+    toast(t("edit.failed", { msg: e.message }));
+  }
+}
+
+function bumpLikes(id, delta) {
+  for (const v of S.lib.values()) if (Array.isArray(v)) for (const it of v) if (it.id === id) it.likes = Math.max(0, it.likes + delta);
+  for (const f of S.full.values()) if (f?.card?.meta?.ref === id) f.card.meta.likes = Math.max(0, (f.card.meta.likes || 0) + delta);
+  for (const it of S.admin?.shared || []) if (it.id === id) it.likes = Math.max(0, it.likes + delta);
+}
+
+async function toggleLike(id) {
+  const on = !liked(id);
+  const before = S.settings.liked || [];
+  S.settings.liked = on ? [...before, id].slice(-LIKED_MAX) : before.filter((x) => x !== id);
+  bumpLikes(id, on ? 1 : -1);
+  renderPanel();
+  try {
+    await S.db.likeShared(id, on);
+    saveSettingsSoon();
+  } catch (e) {
+    S.settings.liked = before;
+    bumpLikes(id, on ? -1 : 1);
+    renderPanel();
+    toast(t("lib.likeFailed", { msg: e.message }));
+  }
+}
+
+async function deleteShared(id) {
+  if (!confirm(t("lib.confirmDelete"))) return;
+  try {
+    await S.db.deleteShared(id);
+    for (const [key, v] of S.lib) if (Array.isArray(v)) S.lib.set(key, v.filter((it) => it.id !== id));
+    if (S.admin?.shared) S.admin.shared = S.admin.shared.filter((it) => it.id !== id);
+    renderPanel();
+    toast(t("lib.deleted"));
+  } catch (e) {
+    toast(t("lib.deleteFailed", { msg: e.message }));
+  }
+}
+
+// After an analysis made with the user's own key: add it to the shared library.
+async function shareGenerated(w, lang, src, d, model, explainIn) {
+  const k = wkey(lang, w);
+  const me = S.db.userInfo().uid;
+  const older = libItems(w, lang).filter((it) => it.by === me && it.xl === explainIn);
+  const id = await S.db.shareCard({ lang, word: w, xl: explainIn, card: d, model });
+  // A regenerated analysis replaces the author's previous one instead of piling up.
+  for (const it of older) await S.db.deleteShared(it.id).catch(() => {});
+  S.lib.delete(k); // reload the list next time the word opens
+  await S.db.shareCtx({ lang, xl: explainIn, sentence: src.sentence, word: w, text: d.context, ru: d.sentence_translation, tr: d.translation });
+  const quick = { translation: d.translation, pronunciation: d.pronunciation, reading: d.reading, ipa: d.ipa, pos: d.pos, lemma: d.lemma };
+  await S.db.sharedDictAdd(lang, explainIn, [{ word: w, quick }]);
+  return id;
 }
 
 function jumpOcc(dir) {
@@ -1202,7 +1382,7 @@ function afterLevelChange(w, lang) {
 
 async function ensureQuick(w, force = false, lang = selLang()) {
   const k = wkey(lang, w);
-  if (!needsQuick(rowOf(w, lang)) || S.quickBusy.has(k) || !apiKey()) return;
+  if (!needsQuick(rowOf(w, lang)) || S.quickBusy.has(k)) return;
   if (!force && S.quickErr.has(k)) return;
   let sentence = "";
   let surface = w;
@@ -1217,14 +1397,20 @@ async function ensureQuick(w, force = false, lang = selLang()) {
   S.quickErr.delete(k);
   patchQuick(w, lang);
   try {
-    const res = await lookupWords({ apiKey: apiKey(), model: S.settings.dictModel, lang, xl: xl(), items: [{ word: surface, sentence }] });
-    const q = res.map.get(w) || [...res.map.values()][0];
-    if (!q) throw new Error(t("err.noTranslation"));
-    await S.db.saveWord({ word: w, lang, quick: q });
-    setRow({ ...rowOf(w, lang), quick: q });
-    const f = S.full.get(k);
-    if (f) f.quick = q;
-    addSpent(res.cost);
+    // The shared dictionary first: free for everyone. Then Claude, if the user has a key.
+    const x = xl();
+    let q = (await S.db.sharedDictLookup(lang, x, [w]).catch(() => new Map())).get(w);
+    if (!q && apiKey()) {
+      const res = await lookupWords({ apiKey: apiKey(), model: S.settings.dictModel, lang, xl: x, items: [{ word: surface, sentence }] });
+      q = res.map.get(w) || [...res.map.values()][0];
+      if (!q) throw new Error(t("err.noTranslation"));
+      addSpent(res.cost);
+      if (sharing()) S.db.sharedDictAdd(lang, x, [{ word: w, quick: q }]).catch(() => {});
+    }
+    if (q) {
+      await S.db.saveWord({ word: w, lang, quick: q });
+      applyQuick(w, lang, q);
+    }
   } catch (e) {
     S.quickErr.set(k, e.message || String(e));
   } finally {
@@ -1232,6 +1418,12 @@ async function ensureQuick(w, force = false, lang = selLang()) {
     patchQuick(w, lang);
     updateChapterStats();
   }
+}
+
+function applyQuick(w, lang, q) {
+  setRow({ ...rowOf(w, lang), quick: q });
+  const f = S.full.get(wkey(lang, w));
+  if (f) f.quick = q;
 }
 
 function patchQuick(w, lang) {
@@ -1345,9 +1537,10 @@ function generateFor(w, lang, src, wish = "") {
         ? { translation: d.translation, pronunciation: d.pronunciation, reading: d.reading, ipa: d.ipa, pos: d.pos, lemma: d.lemma, xl: explainIn }
         : row.quick;
       await S.db.saveWord({ word: w, lang, card, contexts, quick });
-      S.full.set(k, { ...full, card, contexts, quick });
+      S.full.set(k, { ...full, card, contexts, quick, refMissing: false });
       setRow({ ...rowOf(w, lang), quick, has_card: true });
       addSpent(res.cost);
+      if (sharing()) shareGenerated(w, lang, src, d, res.model, explainIn).catch(() => {});
       return true;
     } catch (e) {
       if (e?.name !== "AbortError") S.genErr.set(k, e.message || String(e));
@@ -1404,6 +1597,9 @@ async function explainHere() {
     await S.db.saveWord({ word: w, lang, contexts });
     S.full.set(k, { ...fresh, contexts });
     addSpent(res.cost);
+    if (sharing()) {
+      S.db.shareCtx({ lang, xl: xl(), sentence, word: w, text: res.data.context, ru: res.data.sentence_translation, tr: res.data.translation }).catch(() => {});
+    }
   } catch (e) {
     S.ctxErr = e.message || String(e);
   } finally {
@@ -1463,10 +1659,10 @@ function quickHTML(w, row, lang) {
   if (q && (q.translation || q.pronunciation) && !busy) {
     return `${q.translation ? `<div class="pp-tr">${esc(q.translation)}</div>` : ""}<div class="pp-chips">${quickChips(q, w, lang)}</div>`;
   }
-  if (!apiKey())
-    return `<p class="pp-note">${th("word.noKey", { settings: `<button class="pp-link" data-act="panel" data-mode="settings">${esc(t("empty.settingsLink"))}</button>` }, ["settings"])}</p>`;
   const err = S.quickErr.get(wkey(lang, w));
   if (err) return `<div class="pp-error"><p>${esc(t("word.quickFailed", { msg: err }))}</p><button class="pp-soft-btn" data-act="retry-quick">${esc(t("common.retry"))}</button></div>`;
+  if (!busy && !apiKey())
+    return `<p class="pp-note">${th("word.noKey", { settings: `<button class="pp-link" data-act="panel" data-mode="settings">${esc(t("empty.settingsLink"))}</button>` }, ["settings"])}</p>`;
   return `<div class="pp-sk" style="width:46%;height:20px"></div><div class="pp-sk" style="width:72%"></div>`;
 }
 
@@ -1506,6 +1702,7 @@ function sentenceHTML(sel, row, full) {
   const occ = S.st.occ.get(w) || [];
   const pos = occ.findIndex(([s, tt]) => s === sel.sid && tt === sel.ti);
   const here = (full?.contexts || []).find((c) => c.s === sentence);
+  const shared = here?.text ? null : S.sharedCtx.get(ctxKey(lang, xl(), sentence, w));
   const sentInner = tokens
     .map((tk, ti) =>
       tk.w
@@ -1518,11 +1715,12 @@ function sentenceHTML(sel, row, full) {
     const qt = String(row.quick?.translation || "").toLowerCase();
     const showTr = here.tr && qt && !qt.includes(String(here.tr).toLowerCase());
     why = `<p>${esc(here.text)}${showTr ? ` <span class="pp-here-tr">${esc(t("word.hereTr", { tr: here.tr }))}</span>` : ""}</p>`;
-  } else if (S.gen.has(wkey(lang, w))) why = `<p class="pp-note">${esc(t("word.whyWithCard"))}</p>`;
+  } else if (shared?.text) why = `<p>${esc(shared.text)}</p><p class="pp-note">${esc(t("lib.ctxShared"))}</p>`;
+  else if (S.gen.has(wkey(lang, w))) why = `<p class="pp-note">${esc(t("word.whyWithCard"))}</p>`;
   else if (S.ctxJob?.w === w && S.ctxJob.lang === lang) why = skel(2);
-  else if (row.has_card || full?.card)
+  else if ((row.has_card || full?.card) && apiKey())
     why = `${S.ctxErr ? `<p class="pp-error-line">${esc(S.ctxErr)}</p>` : ""}<button class="pp-soft-btn" data-act="explain-here">${I.sparkles} ${esc(t("word.explainHere"))}</button>`;
-  else why = `<p class="pp-note">${esc(t("word.whyAfterCard"))}</p>`;
+  else why = `<p class="pp-note">${esc(t(apiKey() ? "word.whyAfterCard" : "word.whyNoKey"))}</p>`;
 
   return `<section class="pp-sec">
     <div class="pp-sec-h"><h3 class="pp-h">${esc(t("word.inStory"))}</h3>${
@@ -1534,7 +1732,7 @@ function sentenceHTML(sel, row, full) {
       <p class="pp-sent hl-${esc(S.settings.highlight)}" data-hl ${readerLangAttrs(lang)}>${sentInner}</p>
       <button class="pp-icon-btn sm pp-sent-say" data-act="speak" data-text="${esc(sentence)}" data-lang="${esc(lang)}" title="${esc(t("word.readAloud"))}" aria-label="${esc(t("word.readAloud"))}">${I.volume}</button>
     </div>
-    ${here?.ru ? `<p class="pp-sent-ru">${esc(here.ru)}</p>` : ""}
+    ${here?.ru || shared?.ru ? `<p class="pp-sent-ru">${esc(here?.ru || shared.ru)}</p>` : ""}
     <h3 class="pp-h pp-h-gap">${esc(t("word.why"))}</h3>
     ${why}
   </section>`;
@@ -1552,6 +1750,7 @@ function cardHTML(sel, row, full) {
   const card = full?.card;
   const info = modelInfo(S.settings.cardModel);
   const err = S.genErr.get(k);
+  const key = !!apiKey();
   if (job) {
     const showThinking = S.settings.showThinking && info.thinking === "adaptive";
     return `<section class="pp-sec pp-gen">
@@ -1562,32 +1761,46 @@ function cardHTML(sel, row, full) {
     </section>`;
   }
   if (row.has_card && !full) return `<section class="pp-sec">${skel(5)}</section>`;
+  const settingsLink = `<button class="pp-link" data-act="panel" data-mode="settings">${esc(t("empty.settingsLink"))}</button>`;
   if (!card) {
     const est = estimateCardCost(S.settings.cardModel, S.settings.cardEffort);
-    return `<section class="pp-sec pp-cta">
+    const own = key
+      ? `<button class="pp-primary" data-act="gen-card">${I.sparkles} ${esc(t("gen.button"))}</button>
+         <p class="pp-note">${esc(info.name + effortText(info.id, S.settings.cardEffort))}.${info.custom ? "" : ` ${esc(t("gen.estimate", { cost: money(est) }))}`}</p>`
+      : `<p class="pp-note">${th("gen.noKey", { settings: settingsLink }, ["settings"])}</p>`;
+    const cta = `<section class="pp-sec pp-cta">
+      ${full?.refMissing ? `<div class="pp-error"><p>${esc(t("lib.refMissing"))}</p></div>` : ""}
       ${err ? `<div class="pp-error"><p>${esc(t("gen.failed", { msg: err }))}</p></div>` : ""}
-      <button class="pp-primary" data-act="gen-card">${I.sparkles} ${esc(t("gen.button"))}</button>
-      <p class="pp-note">${esc(info.name + effortText(info.id, S.settings.cardEffort))}.${info.custom ? "" : ` ${esc(t("gen.estimate", { cost: money(est) }))}`}</p>
+      ${own}
       <button class="pp-link" data-act="edit">${esc(t("gen.manual"))}</button>
     </section>`;
+    // Without a key the library is the main way to get an explanation, so it goes first.
+    return key ? cta + libraryHTML(sel) : libraryHTML(sel) + cta;
   }
   const fk = factKey(card.fact_type);
   const meta = card.meta || {};
+  const fromLibrary = !!meta.ref;
   const metaLine = meta.manual
     ? t("card.manual")
-    : meta.model
-      ? t("card.meta", {
-          model: modelInfo(meta.model).name + effortText(meta.model, meta.effort),
-          tokens: fmtInt((meta.input_tokens || 0) + (meta.output_tokens || 0)),
-          cost: money(meta.cost || 0),
-        })
-      : "";
+    : fromLibrary
+      ? meta.model
+        ? t("lib.model", { model: modelInfo(meta.model).name })
+        : ""
+      : meta.model
+        ? t("card.meta", {
+            model: modelInfo(meta.model).name + effortText(meta.model, meta.effort),
+            tokens: fmtInt((meta.input_tokens || 0) + (meta.output_tokens || 0)),
+            cost: money(meta.cost || 0),
+          })
+        : "";
   const sec = (title, text) => (text ? `<section class="pp-sec"><h3 class="pp-h">${esc(title)}</h3><p>${esc(text)}</p></section>` : "");
   const qt = String(row.quick?.translation || "").toLowerCase();
   const otherXl = !meta.manual && cardXl(card) !== xl();
+  const me = S.db.userInfo().uid;
   return `
+    ${fromLibrary ? `<p class="pp-lib-src">${I.users}<span>${th("lib.fromBy", { name: meta.byName || t("lib.someone") })}</span>${likeButtonHTML(meta.ref, meta.likes, meta.by === me)}</p>` : ""}
     ${card.translation && qt && !qt.includes(String(card.translation).toLowerCase()) ? `<p class="pp-note pp-card-tr">${th("card.translatedAs", { tr: card.translation })}</p>` : ""}
-    ${otherXl ? `<div class="pp-error pp-card-xl"><p>${esc(t("card.otherXl", { lang: langName(cardXl(card)) }))}</p><button class="pp-soft-btn" data-act="regen-xl">${I.sparkles} ${esc(t("card.regenXl", { lang: langName(xl()) }))}</button></div>` : ""}
+    ${otherXl ? `<div class="pp-error pp-card-xl"><p>${esc(t("card.otherXl", { lang: langName(cardXl(card)) }))}</p>${key ? `<button class="pp-soft-btn" data-act="regen-xl">${I.sparkles} ${esc(t("card.regenXl", { lang: langName(xl()) }))}</button>` : ""}</div>` : ""}
     ${sec(t("card.etymology"), card.etymology)}
     ${sec(t("card.history"), card.history)}
     ${card.fact ? `<section class="pp-sec"><div class="pp-fact" data-k="${fk}"><div class="pp-fact-h"><span class="pp-fact-emoji" aria-hidden="true">${FACT_EMOJI[fk]}</span>${esc(t(`fact.${fk}.title`))}</div><p>${esc(card.fact)}</p></div></section>` : ""}
@@ -1596,16 +1809,80 @@ function cardHTML(sel, row, full) {
     <section class="pp-sec pp-card-foot">
       ${err ? `<div class="pp-error"><p>${esc(t("gen.regenFailed", { msg: err }))}</p></div>` : ""}
       ${
-        S.regenOpen
+        S.regenOpen && key
           ? `<label class="pp-label" for="regen-wish">${esc(t("regen.wishLabel"))}</label>
              <textarea class="pp-input" id="regen-wish" rows="2" placeholder="${esc(t("regen.wishPlaceholder"))}"></textarea>
              <div class="pp-row"><button class="pp-primary" data-act="regen-go">${I.sparkles} ${esc(t("regen.go"))}</button><button class="pp-soft-btn" data-act="regen-close">${esc(t("common.cancel"))}</button></div>
              <p class="pp-note">${esc(t("regen.note"))}</p>`
-          : `<div class="pp-row"><button class="pp-soft-btn" data-act="edit">${I.edit} ${esc(t("card.edit"))}</button><button class="pp-soft-btn" data-act="regen-open">${I.sparkles} ${esc(t("regen.go"))}</button></div>`
+          : `<div class="pp-row">
+               <button class="pp-soft-btn" data-act="edit">${I.edit} ${esc(t("card.edit"))}</button>
+               ${key ? `<button class="pp-soft-btn" data-act="regen-open">${I.sparkles} ${esc(t("regen.go"))}</button>` : ""}
+               ${S.libOpen ? "" : `<button class="pp-soft-btn" data-act="lib-open">${I.users} ${esc(t(fromLibrary ? "lib.chooseOther" : "lib.others"))}</button>`}
+             </div>`
       }
       ${metaLine ? `<p class="pp-note">${esc(metaLine)}</p>` : ""}
       <p class="pp-note">${esc(t("card.aiNote"))}</p>
-    </section>`;
+    </section>
+    ${S.libOpen ? libraryHTML(sel) : ""}`;
+}
+
+function likeButtonHTML(id, likes, own) {
+  const count = `<b>${fmtInt(likes || 0)}</b>`;
+  if (own) return `<span class="pp-like is-own" title="${esc(t("lib.likesOwn"))}">${I.heart}${count}</span>`;
+  const on = liked(id);
+  return `<button class="pp-like${on ? " on" : ""}" data-act="lib-like" data-id="${esc(id)}" aria-pressed="${on}" title="${esc(t(on ? "lib.unlike" : "lib.like"))}">${I.heart}${count}</button>`;
+}
+
+// Other learners' explanations of the word, best first, the ones in your explanation language on top.
+function libraryHTML(sel) {
+  const { w, lang } = sel;
+  const v = S.lib.get(wkey(lang, w));
+  const head = (n) =>
+    `<div class="pp-sec-h"><h3 class="pp-h">${esc(n == null ? t("lib.title") : t("lib.titleN", { n }))}</h3>${
+      S.libOpen ? `<button class="pp-link" data-act="lib-close">${esc(t("lib.hide"))}</button>` : ""
+    }</div>`;
+  if (v === undefined || v === "loading") return `<section class="pp-sec pp-lib">${head(null)}${skel(2)}</section>`;
+  if (!v.length) {
+    if (apiKey() && !S.libOpen) return "";
+    return `<section class="pp-sec pp-lib">${head(0)}<p class="pp-note">${esc(t(apiKey() ? "lib.emptyKey" : "lib.empty"))}</p></section>`;
+  }
+  const mine = xl();
+  const items = [...v].sort((a, b) => (b.xl === mine) - (a.xl === mine));
+  const current = S.full.get(wkey(lang, w))?.card?.meta?.ref;
+  return `<section class="pp-sec pp-lib">${head(v.length)}${items.map((it) => libItemHTML(it, current)).join("")}</section>`;
+}
+
+function libItemHTML(it, current) {
+  const me = S.db.userInfo().uid;
+  const c = it.card || {};
+  const open = S.libMore.has(it.id);
+  const date = it.created ? new Date(it.created).toLocaleDateString(uiLang()) : "";
+  const preview = c.etymology || c.history || c.fact || "";
+  const part = (title, text) => (text ? `<h4 class="pp-lib-sub">${esc(title)}</h4><p>${esc(text)}</p>` : "");
+  const body = open
+    ? `${part(t("card.etymology"), c.etymology)}${part(t("card.history"), c.history)}${part(t(`fact.${factKey(c.fact_type)}.title`), c.fact)}${
+        c.relatives?.length ? `<h4 class="pp-lib-sub">${esc(t("card.relatives"))}</h4><p>${esc(c.relatives.join(", "))}</p>` : ""
+      }${part(t("card.mnemonic"), c.mnemonic)}`
+    : `<p class="pp-lib-preview">${esc(preview.length > 180 ? `${preview.slice(0, 180)}…` : preview)}</p>`;
+  return `<article class="pp-lib-item${it.id === current ? " is-used" : ""}">
+    <div class="pp-lib-h">
+      <span class="pp-lib-by">${esc(it.byName || t("lib.someone"))}</span>
+      ${it.xl !== xl() ? `<span class="pp-lang-tag" title="${esc(langName(it.xl))}">${esc(langCode(it.xl))}</span>` : ""}
+      <span class="pp-note">${esc(date)}</span>
+      ${likeButtonHTML(it.id, it.likes, it.by === me)}
+    </div>
+    ${c.translation ? `<p class="pp-lib-tr">${esc(c.translation)}</p>` : ""}
+    <div class="pp-lib-body">${body}</div>
+    <div class="pp-row pp-lib-actions">
+      ${
+        it.id === current
+          ? `<span class="pp-note">${esc(t("lib.inUse"))}</span>`
+          : `<button class="pp-soft-btn" data-act="lib-use" data-id="${esc(it.id)}">${esc(t("lib.use"))}</button>`
+      }
+      <button class="pp-link" data-act="lib-more" data-id="${esc(it.id)}">${esc(t(open ? "lib.less" : "lib.more"))}</button>
+      ${it.by === me || S.isAdmin ? `<button class="pp-link pp-danger" data-act="lib-delete" data-id="${esc(it.id)}">${esc(t("lib.delete"))}</button>` : ""}
+    </div>
+  </article>`;
 }
 
 function editHTML(sel, row, full) {
@@ -1700,6 +1977,8 @@ async function saveEdit() {
     card = full.card
       ? { ...full.card, ...shared, ...fields }
       : { ...shared, ...fields, meta: { manual: true, xl: xl(), at: new Date().toISOString() } };
+    // Editing an explanation taken from the library makes it your own copy; the shared one stays as it was.
+    if (card.meta?.ref) card.meta = { manual: true, forkOf: card.meta.ref, xl: card.meta.xl, at: new Date().toISOString() };
   }
 
   let contexts = full.contexts || [];
@@ -1737,13 +2016,10 @@ async function saveEdit() {
 
 async function prepareDictionary(manual = false) {
   if (!S.st || !S.chapter) return;
-  if (!apiKey()) {
-    if (manual) toast(t("toast.needKey"));
-    return;
-  }
   if (S.dict.running) return;
   const lang = S.chapter.lang;
-  const missing = [...S.st.firstOcc.entries()]
+  const x = xl();
+  let missing = [...S.st.firstOcc.entries()]
     .filter(([w]) => needsQuick(rowOf(w, lang)))
     .map(([w, o]) => ({ key: w, word: o.surface, sentence: S.st.sentences[o.sid].trim().slice(0, 160) }));
   if (!missing.length) {
@@ -1754,42 +2030,82 @@ async function prepareDictionary(manual = false) {
   S.dict = { running: true, done: 0, total: missing.length, token };
   updateTopProgress();
   updateChapterStats();
-  let failed = null;
-  for (let i = 0; i < missing.length; i += DICT_BATCH) {
-    if (S.dict.token !== token) return;
-    const batch = missing.slice(i, i + DICT_BATCH).filter((it) => needsQuick(rowOf(it.key, lang)));
-    if (batch.length) {
-      try {
-        const res = await lookupWords({
-          apiKey: apiKey(),
-          model: S.settings.dictModel,
-          lang,
-          xl: xl(),
-          items: batch.map(({ word, sentence }) => ({ word, sentence })),
-        });
-        const rows = batch.filter((it) => res.map.has(it.key)).map((it) => ({ word: it.key, lang, quick: res.map.get(it.key) }));
-        await S.db.saveWords(rows);
-        for (const r of rows) {
-          setRow({ ...rowOf(r.word, lang), quick: r.quick });
-          const f = S.full.get(wkey(lang, r.word));
-          if (f) f.quick = r.quick;
-        }
-        addSpent(res.cost);
-        if (S.sel && S.sel.lang === lang && rows.some((r) => r.word === S.sel.w)) patchQuick(S.sel.w, lang);
-      } catch (e) {
-        failed = e;
-        break;
+  const touchSelected = (rows) => {
+    if (S.sel && S.sel.lang === lang && rows.some((r) => r.word === S.sel.w)) patchQuick(S.sel.w, lang);
+  };
+
+  // 1. The shared dictionary: free for everyone, with or without a key.
+  try {
+    const found = await S.db.sharedDictLookup(lang, x, missing.map((m) => m.key));
+    if (found.size) {
+      const rows = [...found].map(([word, quick]) => ({ word, lang, quick }));
+      await S.db.saveWords(rows);
+      for (const r of rows) applyQuick(r.word, lang, r.quick);
+      touchSelected(rows);
+      missing = missing.filter((m) => !found.has(m.key));
+      if (S.dict.token === token) {
+        S.dict.done = found.size;
+        updateTopProgress();
       }
     }
-    if (S.dict.token !== token) return;
-    S.dict.done = Math.min(S.dict.total, i + DICT_BATCH);
-    updateTopProgress();
+  } catch {
+    /* the library is a bonus: carry on with Claude */
+  }
+
+  // 2. Claude, for words nobody has translated yet. Saved every few batches to spare database writes.
+  let failed = null;
+  if (missing.length && apiKey()) {
+    let pending = [];
+    let batches = 0;
+    const flush = async () => {
+      if (!pending.length) return;
+      const rows = pending;
+      pending = [];
+      await S.db.saveWords(rows);
+      if (sharing()) S.db.sharedDictAdd(lang, x, rows.map((r) => ({ word: r.word, quick: r.quick }))).catch(() => {});
+    };
+    const base = S.dict.done;
+    for (let i = 0; i < missing.length; i += DICT_BATCH) {
+      if (S.dict.token !== token) break;
+      const batch = missing.slice(i, i + DICT_BATCH).filter((it) => needsQuick(rowOf(it.key, lang)));
+      if (batch.length) {
+        try {
+          const res = await lookupWords({
+            apiKey: apiKey(),
+            model: S.settings.dictModel,
+            lang,
+            xl: x,
+            items: batch.map(({ word, sentence }) => ({ word, sentence })),
+          });
+          const rows = batch.filter((it) => res.map.has(it.key)).map((it) => ({ word: it.key, lang, quick: res.map.get(it.key) }));
+          for (const r of rows) applyQuick(r.word, lang, r.quick);
+          touchSelected(rows);
+          pending.push(...rows);
+          addSpent(res.cost);
+          if (++batches % DICT_FLUSH === 0) await flush();
+        } catch (e) {
+          failed = e;
+          break;
+        }
+      }
+      if (S.dict.token === token) {
+        S.dict.done = Math.min(S.dict.total, base + i + DICT_BATCH);
+        updateTopProgress();
+      }
+    }
+    // Paid translations are saved even when the user stopped the run.
+    try {
+      await flush();
+    } catch (e) {
+      failed = failed || e;
+    }
   }
   if (S.dict.token !== token) return;
   S.dict = { running: false, done: 0, total: 0, token: null };
   updateTopProgress();
   updateChapterStats();
   if (failed) toast(t("dict.stoppedError", { msg: failed.message }));
+  else if (manual && missing.length && !apiKey()) toast(t("dict.needKeyForRest", { n: missing.length }));
 }
 
 function stopDictionary(silent = false) {
@@ -2204,6 +2520,7 @@ function renderSettings() {
       .map(([v, l]) => `<button role="radio" aria-checked="${s[k] === v}" class="${s[k] === v ? "on" : ""}" data-act="seg" data-key="${k}" data-val="${v}">${esc(l)}</button>`)
       .join("")}</div>`;
   const est = estimateCardCost(s.cardModel, s.cardEffort);
+  const me = S.db.userInfo();
   body.innerHTML = `
     <section class="pp-sec pp-sec-first">
       <h3 class="pp-h">${esc(t("set.languages"))}</h3>
@@ -2256,6 +2573,12 @@ function renderSettings() {
     </section>
 
     <section class="pp-sec">
+      <h3 class="pp-h">${esc(t("set.libraryTitle"))}</h3>
+      <label class="pp-check"><input type="checkbox" data-set="share"${sharing() ? " checked" : ""}> ${esc(t("set.share"))}</label>
+      <p class="pp-note pp-mt">${esc(t("set.shareNote", { name: me.name }))}</p>
+    </section>
+
+    <section class="pp-sec">
       <h3 class="pp-h">${esc(t("set.reviewTitle"))}</h3>
       <label class="pp-label" for="set-review-new">${esc(t("set.reviewNew"))}</label>
       <select class="pp-input" id="set-review-new" data-set="reviewNew">${REVIEW_NEW_OPTIONS.map(
@@ -2299,9 +2622,110 @@ function renderSettings() {
 
     <section class="pp-sec">
       <h3 class="pp-h">${esc(t("account.title"))}</h3>
+      <p><b>${esc(me.name)}</b>${S.isAdmin ? ` <span class="pp-lang-tag">${esc(t("account.admin"))}</span>` : ""}</p>
       <p>${esc(S.email || t("account.signedIn"))}</p>
+      <p class="pp-note">${esc(t("account.plan", { plan: t(`plan.${S.profile?.plan || "free"}`) }))}</p>
+      <p class="pp-note pp-uid">${esc(t("account.uid"))}: <code>${esc(me.uid)}</code> <button class="pp-link" data-act="copy-uid">${esc(t("account.copy"))}</button></p>
       <button class="pp-soft-btn pp-mt" data-act="logout">${esc(t("account.logout"))}</button>
     </section>`;
+}
+
+/* ---------------- Admin panel ---------------- */
+
+const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString(uiLang()) : "—");
+
+let adminLoading = false;
+async function loadAdmin(force = false) {
+  if (adminLoading || (S.admin && !force)) return;
+  adminLoading = true;
+  if (force) {
+    S.admin = null;
+    renderPanel();
+  }
+  try {
+    const [counts, users, shared] = await Promise.all([S.db.adminCounts(), S.db.adminUsers(100), S.db.adminRecentShared(50)]);
+    S.admin = { counts, users, shared };
+  } catch (e) {
+    S.admin = { error: e.message };
+  } finally {
+    adminLoading = false;
+    if (S.panel.open && S.panel.mode === "admin") renderAdmin();
+  }
+}
+
+function renderAdmin() {
+  const body = $("#drawer-body");
+  if (!body || S.panel.mode !== "admin") return;
+  if (!S.isAdmin) {
+    body.innerHTML = `<p class="pp-note pp-pad">${esc(t("admin.only"))}</p>`;
+    return;
+  }
+  const a = S.admin;
+  if (!a) {
+    body.innerHTML = `<div class="pp-pad">${skel(6)}</div>`;
+    loadAdmin();
+    return;
+  }
+  if (a.error) {
+    body.innerHTML = `<div class="pp-pad"><p class="pp-error-line">${esc(a.error)}</p><button class="pp-soft-btn pp-mt" data-act="admin-refresh">${esc(t("common.retry"))}</button></div>`;
+    return;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const userHTML = (u) => `<div class="pp-adm-item">
+      <div class="pp-adm-h"><b>${esc(u.name || "—")}</b><span class="pp-note">${esc(u.email || "")}</span></div>
+      <p class="pp-note">${esc(t("admin.userLine", { created: fmtDate(u.created), seen: fmtDate(u.lastSeen), words: u.words || 0, cards: u.cards || 0 }))}</p>
+      <div class="pp-row pp-adm-plan-row">
+        <select class="pp-input pp-adm-plan" data-uid="${esc(u.uid)}" aria-label="${esc(t("admin.plan"))}">${["free", "pro"]
+          .map((p) => `<option value="${p}"${(u.plan || "free") === p ? " selected" : ""}>${esc(t(`plan.${p}`))}</option>`)
+          .join("")}</select>
+        <input class="pp-input pp-adm-until" type="date" data-uid="${esc(u.uid)}" value="${esc(String(u.planUntil || "").slice(0, 10))}" min="${today}" aria-label="${esc(t("admin.until"))}" title="${esc(t("admin.until"))}">
+        <button class="pp-soft-btn" data-act="admin-plan" data-uid="${esc(u.uid)}">${esc(t("common.save"))}</button>
+      </div>
+    </div>`;
+  const sharedHTML = (it) => `<div class="pp-adm-item">
+      <div class="pp-lib-h">
+        <b ${readerLangAttrs(it.lang)}>${esc(it.word)}</b>
+        <span class="pp-lang-tag" title="${esc(`${langName(it.lang)} → ${langName(it.xl)}`)}">${esc(`${langCode(it.lang)}→${langCode(it.xl)}`)}</span>
+        <span class="pp-note">${esc(it.byName || "")}</span>
+        <span class="pp-like is-own">${I.heart}<b>${fmtInt(it.likes)}</b></span>
+      </div>
+      ${it.card?.translation ? `<p class="pp-lib-tr">${esc(it.card.translation)}</p>` : ""}
+      <p class="pp-lib-preview">${esc(String(it.card?.etymology || it.card?.fact || "").slice(0, 160))}</p>
+      <div class="pp-row"><span class="pp-note">${esc(fmtDate(it.created))}</span><button class="pp-link pp-danger" data-act="admin-delete" data-id="${esc(it.id)}">${esc(t("lib.delete"))}</button></div>
+    </div>`;
+  body.innerHTML = `
+    <section class="pp-sec pp-sec-first">
+      <div class="pp-sec-h"><h3 class="pp-h">${esc(t("admin.overview"))}</h3><button class="pp-link" data-act="admin-refresh">${esc(t("admin.refresh"))}</button></div>
+      <div class="pp-rv-stats">
+        <div><b>${fmtInt(a.counts.users)}</b><span>${esc(t("admin.users"))}</span></div>
+        <div><b>${fmtInt(a.counts.cards)}</b><span>${esc(t("admin.sharedCards"))}</span></div>
+      </div>
+      <p class="pp-note pp-mt">${esc(t("admin.quotaNote"))}</p>
+    </section>
+    <section class="pp-sec">
+      <h3 class="pp-h">${esc(t("admin.usersTitle"))}</h3>
+      <p class="pp-note">${esc(t("admin.proNote"))}</p>
+      ${a.users.map(userHTML).join("") || `<p class="pp-note">${esc(t("admin.noUsers"))}</p>`}
+    </section>
+    <section class="pp-sec">
+      <h3 class="pp-h">${esc(t("admin.sharedTitle"))}</h3>
+      ${a.shared.map(sharedHTML).join("") || `<p class="pp-note">${esc(t("admin.noShared"))}</p>`}
+    </section>`;
+}
+
+async function savePlan(uid) {
+  const plan = $(`.pp-adm-plan[data-uid="${cssEsc(uid)}"]`)?.value || "free";
+  const until = $(`.pp-adm-until[data-uid="${cssEsc(uid)}"]`)?.value || "";
+  const planUntil = plan === "free" || !until ? null : new Date(`${until}T23:59:59Z`).toISOString();
+  try {
+    await S.db.adminSetPlan(uid, plan, planUntil);
+    const u = S.admin?.users.find((x) => x.uid === uid);
+    if (u) Object.assign(u, { plan, planUntil });
+    if (uid === S.db.userInfo().uid) S.profile = { ...(S.profile || {}), plan, planUntil };
+    toast(t("admin.saved"));
+  } catch (e) {
+    toast(t("admin.saveFailed", { msg: e.message }));
+  }
 }
 
 function saveKey() {
