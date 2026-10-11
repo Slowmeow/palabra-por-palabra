@@ -36,6 +36,7 @@ const DEFAULTS = {
   autoDict: true,
   reviewNew: 20,
   share: true, // add my translations and analyses to the shared library
+  ttsRate: 0.85, // speed of reading a chapter aloud
   liked: [], // ids of shared explanations I liked
   lastChapter: null,
   spent: 0,
@@ -173,28 +174,120 @@ if ("speechSynthesis" in window) {
   window.speechSynthesis.onvoiceschanged = loadVoices;
 }
 
+function utterance(text, lang, rate) {
+  if (!voices.length) loadVoices();
+  const tag = langInfo(lang).tts;
+  const base = tag.split("-")[0].toLowerCase();
+  const norm = (v) => (v.lang || "").replace("_", "-").toLowerCase();
+  const voice = voices.find((v) => norm(v) === tag.toLowerCase()) || voices.find((v) => norm(v).startsWith(base));
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = tag;
+  u.rate = rate;
+  if (voice) u.voice = voice;
+  else if (voices.length && !S.voiceWarned.has(base)) {
+    S.voiceWarned.add(base);
+    toast(t("toast.noVoice", { lang: langName(lang) }), 6000);
+  }
+  return u;
+}
+
 function speak(text, lang) {
   if (!("speechSynthesis" in window)) return toast(t("toast.noSpeech"));
   try {
-    const synth = window.speechSynthesis;
-    synth.cancel();
-    if (!voices.length) loadVoices();
-    const tag = langInfo(lang).tts;
-    const base = tag.split("-")[0].toLowerCase();
-    const norm = (v) => (v.lang || "").replace("_", "-").toLowerCase();
-    const voice = voices.find((v) => norm(v) === tag.toLowerCase()) || voices.find((v) => norm(v).startsWith(base));
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = tag;
-    u.rate = 0.9;
-    if (voice) u.voice = voice;
-    else if (voices.length && !S.voiceWarned.has(base)) {
-      S.voiceWarned.add(base);
-      toast(t("toast.noVoice", { lang: langName(lang) }), 6000);
-    }
-    synth.speak(u);
+    ttsStop();
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance(text, lang, 0.9));
   } catch {
     /* speech is unavailable */
   }
+}
+
+/* ---------------- Reading a chapter aloud ---------------- */
+
+const TTS_RATES = [0.7, 0.85, 1, 1.15, 1.3];
+// One utterance per sentence: long utterances get cut off in some browsers, and it lets us highlight.
+const tts = { playing: false, sid: null, token: 0 };
+
+function ttsBarHTML() {
+  if (!("speechSynthesis" in window) || !S.st) return "";
+  const rate = Number(S.settings.ttsRate) || 0.85;
+  const stop = `<button class="pp-icon-btn sm" data-act="tts-stop" title="${esc(t("tts.stop"))}" aria-label="${esc(t("tts.stop"))}">${I.stop}</button>`;
+  const main = tts.playing
+    ? `<button class="pp-soft-btn" data-act="tts-pause">${I.pause} ${esc(t("tts.pause"))}</button>${stop}`
+    : `<button class="pp-soft-btn" data-act="tts-play">${I.play} ${esc(t(tts.sid != null ? "tts.resume" : "tts.listen"))}</button>${tts.sid != null ? stop : ""}`;
+  const rates = TTS_RATES.map((r) => `<option value="${r}"${r === rate ? " selected" : ""}>${r}×</option>`).join("");
+  return `${main}<select class="pp-input pp-tts-rate" data-set="ttsRate" aria-label="${esc(t("tts.rate"))}" title="${esc(t("tts.rate"))}">${rates}</select>`;
+}
+
+function updateTtsBar() {
+  const el = $("#tts-bar");
+  if (el) el.innerHTML = ttsBarHTML();
+}
+
+// The first sentence whose words are on screen below the header.
+function firstVisibleSid() {
+  const head = $(".pp-top");
+  const top = head && getComputedStyle(head).position === "sticky" ? head.offsetHeight : 0;
+  for (const el of $$(".pp-reader .pp-wd")) if (el.getBoundingClientRect().bottom > top + 4) return Number(el.dataset.s);
+  return 0;
+}
+
+function markSpeaking(sid) {
+  $$(".pp-reader .is-speaking").forEach((e) => e.classList.remove("is-speaking"));
+  if (sid == null) return;
+  const spans = $$(`.pp-reader [data-s="${sid}"]`);
+  spans.forEach((e) => e.classList.add("is-speaking"));
+  if (spans[0]) keepVisible(spans[0]);
+}
+
+function ttsPlay() {
+  if (!S.st || !("speechSynthesis" in window)) return;
+  const start = tts.sid ?? (S.sel?.sid ?? firstVisibleSid());
+  window.speechSynthesis.cancel();
+  tts.playing = true;
+  tts.token++;
+  ttsSpeak(start, tts.token);
+  updateTtsBar();
+}
+
+function ttsSpeak(sid, token) {
+  if (token !== tts.token || !S.st) return;
+  while (sid < S.st.sentences.length && !S.st.sentences[sid].trim()) sid++;
+  if (sid >= S.st.sentences.length) return ttsStop();
+  tts.sid = sid;
+  markSpeaking(sid);
+  const u = utterance(S.st.sentences[sid].trim(), S.chapter.lang, Number(S.settings.ttsRate) || 0.85);
+  u.onend = () => {
+    if (token === tts.token && tts.playing) ttsSpeak(sid + 1, token);
+  };
+  u.onerror = (e) => {
+    if (token !== tts.token || e.error === "interrupted" || e.error === "canceled") return;
+    ttsStop();
+    toast(t("tts.failed", { msg: e.error || "" }));
+  };
+  window.speechSynthesis.speak(u);
+}
+
+// Pausing stops at the current sentence and resumes from its start: pause() is unreliable on phones.
+function ttsPause() {
+  tts.playing = false;
+  tts.token++;
+  window.speechSynthesis?.cancel();
+  updateTtsBar();
+}
+
+function ttsStop() {
+  if (!tts.playing && tts.sid == null) return;
+  tts.playing = false;
+  tts.token++;
+  tts.sid = null;
+  try {
+    window.speechSynthesis?.cancel();
+  } catch {
+    /* nothing to stop */
+  }
+  markSpeaking(null);
+  updateTtsBar();
 }
 
 /* ---------------- Boot, connection, sign-in ---------------- */
@@ -407,6 +500,7 @@ function migrateSettings(saved) {
   if (!REVIEW_NEW_OPTIONS.includes(Number(s.reviewNew))) s.reviewNew = DEFAULTS.reviewNew;
   s.reviewNew = Number(s.reviewNew);
   if (!Array.isArray(s.liked)) s.liked = [];
+  if (!TTS_RATES.includes(Number(s.ttsRate))) s.ttsRate = DEFAULTS.ttsRate;
   return s;
 }
 
@@ -602,6 +696,9 @@ const ACTIONS = {
     renderReview();
   },
   "rv-close": () => closeModal(),
+  "tts-play": () => ttsPlay(),
+  "tts-pause": () => ttsPause(),
+  "tts-stop": () => ttsStop(),
   // Shared library
   "lib-use": (a) => useShared(a.dataset.id),
   "lib-like": (a) => toggleLike(a.dataset.id),
@@ -684,7 +781,7 @@ function onChange(e) {
     val = askLangCode();
     if (!val) return renderSettings();
   }
-  if (k === "reviewNew") val = Number(val);
+  if (k === "reviewNew" || k === "ttsRate") val = Number(val);
   S.settings[k] = val;
   if (k === "cardModel") {
     const inf = modelInfo(val);
@@ -825,6 +922,7 @@ async function openChapter(id) {
     return updateChapterSelect();
   }
   S.view = "read";
+  ttsStop();
   stopDictionary(true);
   setMain(loadingHTML("reader.opening"));
   try {
@@ -888,7 +986,7 @@ function renderChapter() {
     .join("");
   setMain(`
     <div class="pp-meta">
-      <div class="pp-meta-row"><p class="pp-stats" id="chap-stats"></p><div class="pp-row" id="chap-actions"></div></div>
+      <div class="pp-meta-row"><p class="pp-stats" id="chap-stats"></p><div class="pp-row" id="chap-actions"></div><div class="pp-row pp-tts" id="tts-bar">${ttsBarHTML()}</div></div>
       <div class="pp-levelbar" id="chap-levelbar" aria-hidden="true"></div>
     </div>
     <article class="${readerClass()}" id="reader" ${readerLangAttrs(lang)} style="font-size:${Number(S.settings.size)}px">${html}</article>
@@ -1083,6 +1181,7 @@ function renderHome() {
     return;
   }
   S.view = "home";
+  ttsStop();
   S.editing = false;
   if (S.panel.open && S.panel.mode === "word") closePanel(true);
   S.sel = null;
