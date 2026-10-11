@@ -208,7 +208,9 @@ export async function boot() {
   if (!S.db) {
     let makeDb;
     try {
-      ({ makeDb } = await import("./db.js"));
+      // A stalled CDN would otherwise leave "Loading…" on screen forever.
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 20000));
+      ({ makeDb } = await Promise.race([import("./db.js"), timeout]));
     } catch {
       return renderMessage(t("boot.libFailed"), t("boot.libFailedText"));
     }
