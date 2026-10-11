@@ -1,0 +1,31 @@
+name: Ping Supabase
+
+# Бесплатный проект Supabase засыпает после недели без обращений.
+# Этот запрос раз в три дня держит его живым.
+# Чтобы он заработал, добавьте в репозитории Settings → Secrets and variables → Actions:
+#   SUPABASE_URL              — например https://xxxx.supabase.co
+#   SUPABASE_PUBLISHABLE_KEY  — publishable key (не секретный!)
+
+on:
+  schedule:
+    - cron: "17 6 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call ping()
+        env:
+          URL: ${{ secrets.SUPABASE_URL }}
+          KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if [ -z "$URL" ] || [ -z "$KEY" ]; then
+            echo "Секреты не заданы, пропускаю."
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/rest/v1/rpc/ping" \
+            -H "apikey: $KEY" -H "Authorization: Bearer $KEY" \
+            -H "Content-Type: application/json" -d '{}')
+          echo "HTTP $code"
+          [ "$code" = "200" ]
