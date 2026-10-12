@@ -1,28 +1,57 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="utf-8">
-  <!-- Scripts only from this site and Google's Firebase CDN; data only to Firebase and the Claude API. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com https://www.google.com/recaptcha/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://www.gstatic.com https://www.google.com https://*.googleusercontent.com; connect-src 'self' https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://content-firebaseappcheck.googleapis.com https://www.google.com/recaptcha/ https://api.anthropic.com; frame-src https://*.firebaseapp.com https://accounts.google.com https://apis.google.com https://www.google.com/recaptcha/; object-src 'none'; base-uri 'self'; form-action 'self'">
-  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <!-- Palabra por palabra has moved into AntonCards. This page only sends visitors there.
+       The script hash below must match the inline script exactly; recompute it if the script changes. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-AtaXVYNDbobeIII0ojUsECZdxBEwN4jYF5gP7TtSJus='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="refresh" content="3; url=https://audiocards.vercel.app/">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex, nofollow">
   <meta name="theme-color" content="#2344a0">
-  <link rel="manifest" href="manifest.webmanifest">
-  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <meta name="apple-mobile-web-app-title" content="Palabra">
-  <meta name="mobile-web-app-capable" content="yes">
-  <title>Palabra por palabra</title>
+  <title>Palabra por palabra → AntonCards</title>
+  <link rel="canonical" href="https://audiocards.vercel.app/">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232344a0'/%3E%3Ctext x='32' y='46' font-size='40' text-anchor='middle' fill='white' font-family='Georgia,serif' font-style='italic'%3E%C3%B1%3C/text%3E%3C/svg%3E">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Alegreya:ital,wght@0,400;0,500;0,700;1,400;1,500&family=Alegreya+Sans:wght@400;500;700&display=swap">
-  <link rel="stylesheet" href="styles.css">
-  <script src="config.js"></script>
-  <script type="module" src="js/app.js"></script>
+  <style>
+    :root { --bg: #fbf8f2; --fg: #1d1b18; --muted: #6b6560; --accent: #2344a0; --on-accent: #ffffff; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16161a; --fg: #eeeae4; --muted: #a29d96; --accent: #8fa8f0; --on-accent: #16161a; } }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+    body { display: flex; align-items: center; justify-content: center; padding: 24px 16px; box-sizing: border-box;
+      font: 18px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; text-align: center; }
+    h1 { font-size: 24px; line-height: 1.3; margin: 0 0 8px; }
+    p { margin: 0 0 20px; color: var(--muted); }
+    a { display: inline-block; padding: 12px 22px; border-radius: 10px; background: var(--accent); color: var(--on-accent);
+      font-weight: 600; text-decoration: none; }
+  </style>
 </head>
 <body>
-  <div id="app" class="pp"><div class="pp-boot">Loading…</div></div>
-  <noscript><p style="padding:24px;font-family:sans-serif">This site needs JavaScript.</p></noscript>
+  <main>
+    <h1>Palabra por palabra теперь в AntonCards</h1>
+    <p>Все функции переехали в одно приложение. Сейчас откроется новый адрес.</p>
+    <a href="https://audiocards.vercel.app/">Открыть AntonCards</a>
+  </main>
+  <script>
+(function () {
+  var target = "https://audiocards.vercel.app/";
+  var gone = false;
+  var go = function () { if (!gone) { gone = true; location.replace(target); } };
+  // Drop the old offline copy of the app on the way out, so an installed app stops showing it.
+  var jobs = [];
+  try {
+    if (navigator.serviceWorker) {
+      jobs.push(navigator.serviceWorker.getRegistrations().then(function (regs) {
+        return Promise.all(regs.map(function (reg) { return reg.unregister(); }));
+      }));
+    }
+    if (window.caches) {
+      jobs.push(caches.keys().then(function (keys) {
+        return Promise.all(keys.map(function (key) { return caches.delete(key); }));
+      }));
+    }
+  } catch (e) {}
+  Promise.all(jobs).then(go, go);
+  setTimeout(go, 1500);
+})();
+  </script>
 </body>
 </html>

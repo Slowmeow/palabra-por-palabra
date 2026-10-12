@@ -1,5 +1,8 @@
 # Palabra por palabra
 
+> **Moved.** All features of this site now live in AntonCards: **https://audiocards.vercel.app/**.
+> The published site is only a redirect page (`index.html`, also served as `404.html`) plus `sw.js`, which clears the old offline copy from installed apps. The app code below is kept for reference and is no longer published.
+
 A reader for learning languages word by word. Paste a chapter in Spanish, French, Japanese, German or any other language: every word becomes clickable and gets its own knowledge level from 5 (don't know) to 1 (know). Claude writes the translation, pronunciation, origin, history, a fact and an explanation of why the word is used in that exact place. Words you are learning go into spaced-repetition review. Learners share translations and explanations in a common library, so people without their own Claude key can use the site too.
 
 The site is plain files with no build step. Hosting: GitHub Pages. Database and sign-in (Google account or email): Firebase (free Spark plan). Claude requests are paid separately through the API.
